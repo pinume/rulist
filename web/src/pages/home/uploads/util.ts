@@ -1,41 +1,34 @@
-import { bus } from "~/utils"
+import { bus } from "../../../utils/bus"
 import { UploadFileProps } from "./types"
 
 export const traverseFileTree = async (entry: FileSystemEntry) => {
   const res: File[] = []
 
   const internalProcess = async (entry: FileSystemEntry, path: string) => {
-    await new Promise<void>((resolve, reject) => {
-      const errorCallback: ErrorCallback = (e) => {
-        console.error(e)
-        reject(e)
+    if (entry.isFile) {
+      const file = await new Promise<File>((resolve, reject) =>
+        (entry as FileSystemFileEntry).file(resolve, reject),
+      )
+      res.push(
+        new File([file], path + file.name, {
+          type: file.type,
+          lastModified: file.lastModified,
+        }),
+      )
+      return
+    }
+    if (!entry.isDirectory) return
+
+    const reader = (entry as FileSystemDirectoryEntry).createReader()
+    while (true) {
+      const entries = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+        reader.readEntries(resolve, reject),
+      )
+      if (entries.length === 0) return
+      for (const child of entries) {
+        await internalProcess(child, path + entry.name + "/")
       }
-      if (entry.isFile) {
-        ;(entry as FileSystemFileEntry).file((file) => {
-          const newFile = new File([file], path + file.name, {
-            type: file.type,
-            lastModified: file.lastModified,
-          })
-          res.push(newFile)
-          resolve()
-        }, errorCallback)
-      } else if (entry.isDirectory) {
-        const dirReader = (entry as FileSystemDirectoryEntry).createReader()
-        const readEntries = () => {
-          dirReader.readEntries(async (entries) => {
-            for (let i = 0; i < entries.length; i++) {
-              await internalProcess(entries[i], path + entry.name + "/")
-            }
-            if (entries.length > 0) {
-              readEntries()
-            } else {
-              resolve()
-            }
-          }, errorCallback)
-        }
-        readEntries()
-      }
-    })
+    }
   }
   await internalProcess(entry, "")
   return res
@@ -52,36 +45,17 @@ export const extractFilesFromDataTransfer = async (
     return files
   }
 
-  const entries: {
-    isDirectory: boolean
-    entry?: FileSystemEntry
-    file?: File
-  }[] = []
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i]
+  const res: File[] = []
+  for (const item of items) {
     if (item.kind !== "file") continue
     const entry = item.webkitGetAsEntry?.()
     if (entry?.isDirectory) {
-      entries.push({ isDirectory: true, entry })
-    } else if (files[i]) {
-      entries.push({ isDirectory: false, file: files[i] })
+      res.push(...(await traverseFileTree(entry)))
+    } else {
+      const file = item.getAsFile()
+      if (file) res.push(file)
     }
   }
-
-  const res: File[] = []
-  for (const item of entries) {
-    if (item.isDirectory && item.entry) {
-      try {
-        const innerFiles = await traverseFileTree(item.entry)
-        res.push(...innerFiles)
-      } catch (e) {
-        console.error("Failed to traverse directory", e)
-      }
-    } else if (item.file) {
-      res.push(item.file)
-    }
-  }
-
   return res
 }
 

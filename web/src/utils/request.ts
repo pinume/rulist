@@ -1,5 +1,6 @@
 import axios from "axios"
 import { resetSessionState } from "../store/reset"
+import { setSessionExpired } from "../store/session"
 import { bus } from "./bus"
 
 export const api = window.location.origin
@@ -24,10 +25,11 @@ instance.interceptors.response.use(
   },
   (error) => {
     // response error
-    console.error(error) // for debug
+    if (!axios.isCancel(error)) console.error(error.message)
     if (shouldExpireSession(error.response?.status, error.config?.url)) {
       changeToken()
       resetSessionState()
+      setSessionExpired(true)
 
       if (!location.pathname.startsWith("/@login")) {
         bus.emit(

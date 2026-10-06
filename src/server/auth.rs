@@ -28,14 +28,17 @@ fn login_attempt_key(username: &str) -> String {
 }
 
 async fn verify_password_bounded(password: &str, pwd_hash: &str) -> Result<bool, StatusCode> {
-    let _permit = PASSWORD_VERIFY_SEMAPHORE
+    let permit = PASSWORD_VERIFY_SEMAPHORE
         .try_acquire()
         .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
     let password = password.to_owned();
     let pwd_hash = pwd_hash.to_owned();
-    tokio::task::spawn_blocking(move || verify_password(&password, &pwd_hash))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify_password(&password, &pwd_hash)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 fn password_verify_error(status: StatusCode) -> Response {

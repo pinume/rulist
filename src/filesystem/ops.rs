@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{ffi::CString, io};
 
 use anyhow::{Context, Result, anyhow};
@@ -70,43 +70,16 @@ pub(super) async fn copy_path_safe(src: &Path, dst: &Path, overwrite: bool) -> R
     fs::create_dir_all(parent).await?;
     let nonce = crate::auth::rand_string(24);
     let stage = parent.join(format!(".rulist-copy-stage-{nonce}"));
-    let backup = parent.join(format!(".rulist-backup-{nonce}"));
 
     if let Err(error) = copy_path_recursive(src, &stage).await {
         let _ = remove_path_recursive(&stage).await;
         return Err(error.context("failed to copy source to staging directory"));
     }
 
-    if dst_exists {
-        if let Err(error) = rename_no_replace(dst, &backup).await {
-            let _ = remove_path_recursive(&stage).await;
-            return Err(anyhow!(
-                "failed to backup existing destination {:?}: {}",
-                dst,
-                error
-            ));
-        }
-    }
-
-    let promotion = if overwrite {
-        fs::rename(&stage, dst).await
-    } else {
-        rename_no_replace(&stage, dst).await
-    };
-    if let Err(error) = promotion {
-        if dst_exists {
-            if let Err(restore_error) = rename_no_replace(&backup, dst).await {
-                tracing::error!(
-                    error = %restore_error,
-                    "CRITICAL: failed to restore backup after copy promotion failure"
-                );
-            }
-        }
-        let _ = remove_path_recursive(&stage).await;
-        return Err(anyhow::Error::from(error).context("failed to promote copy stage"));
-    }
-
-    if dst_exists {
+    let backup = promote_stage(&stage, dst, overwrite, dst_exists, ".rulist-backup")
+        .await
+        .context("failed to promote copy stage")?;
+    if let Some(backup) = backup {
         if let Err(error) = remove_path_recursive(&backup).await {
             tracing::warn!(
                 error = %error,
@@ -228,39 +201,21 @@ async fn move_cross_device_safe(src: &Path, dst: &Path, overwrite: bool) -> Resu
 
     let nonce = crate::auth::rand_string(24);
     let stage = parent.join(format!(".rulist-move-stage-{nonce}"));
-    let backup = parent.join(format!(".rulist-move-backup-{nonce}"));
 
     if let Err(error) = copy_path_recursive(src, &stage).await {
         let _ = remove_path_recursive(&stage).await;
         return Err(error.context("failed to stage cross-device move"));
     }
 
-    if had_destination {
-        if let Err(error) = rename_no_replace(dst, &backup).await {
-            let _ = remove_path_recursive(&stage).await;
-            return Err(error).with_context(|| format!("failed to backup destination {:?}", dst));
-        }
-    }
-
-    let promotion = if overwrite {
-        fs::rename(&stage, dst).await
-    } else {
-        rename_no_replace(&stage, dst).await
-    };
-    if let Err(error) = promotion {
-        if had_destination {
-            if let Err(restore_error) = rename_no_replace(&backup, dst).await {
-                tracing::error!(
-                    error = %restore_error,
-                    backup = ?backup,
-                    dst = ?dst,
-                    "CRITICAL: failed to restore destination backup"
-                );
-            }
-        }
-        let _ = remove_path_recursive(&stage).await;
-        return Err(error.into());
-    }
+    let backup = promote_stage(
+        &stage,
+        dst,
+        overwrite,
+        had_destination,
+        ".rulist-move-backup",
+    )
+    .await
+    .context("failed to promote cross-device move stage")?;
 
     if let Err(error) = remove_path_recursive(src).await {
         tracing::error!(
@@ -273,7 +228,7 @@ async fn move_cross_device_safe(src: &Path, dst: &Path, overwrite: bool) -> Resu
         return Err(error.context("destination was copied successfully but source cleanup failed"));
     }
 
-    if had_destination {
+    if let Some(backup) = backup {
         if let Err(error) = remove_path_recursive(&backup).await {
             tracing::warn!(
                 error = %error,
@@ -284,6 +239,50 @@ async fn move_cross_device_safe(src: &Path, dst: &Path, overwrite: bool) -> Resu
     }
 
     Ok(())
+}
+
+async fn promote_stage(
+    stage: &Path,
+    dst: &Path,
+    overwrite: bool,
+    had_destination: bool,
+    backup_prefix: &str,
+) -> Result<Option<PathBuf>> {
+    let backup = if had_destination {
+        let parent = dst
+            .parent()
+            .ok_or_else(|| anyhow!("destination has no parent"))?;
+        let path = parent.join(format!("{backup_prefix}-{}", crate::auth::rand_string(24)));
+        if let Err(error) = rename_no_replace(dst, &path).await {
+            let _ = remove_path_recursive(stage).await;
+            return Err(error).with_context(|| format!("failed to backup destination {:?}", dst));
+        }
+        Some(path)
+    } else {
+        None
+    };
+
+    let promotion = if overwrite {
+        fs::rename(stage, dst).await
+    } else {
+        rename_no_replace(stage, dst).await
+    };
+    if let Err(error) = promotion {
+        if let Some(backup) = &backup {
+            if let Err(restore_error) = rename_no_replace(backup, dst).await {
+                tracing::error!(
+                    error = %restore_error,
+                    backup = ?backup,
+                    dst = ?dst,
+                    "CRITICAL: failed to restore destination backup after staged promotion failure"
+                );
+            }
+        }
+        let _ = remove_path_recursive(stage).await;
+        return Err(error.into());
+    }
+
+    Ok(backup)
 }
 
 async fn copy_path_recursive(src: &Path, dst: &Path) -> Result<()> {
@@ -368,8 +367,26 @@ pub(super) async fn remove_path_recursive(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::rename_no_replace_sync;
+    use super::{promote_stage, rename_no_replace_sync};
     use std::sync::{Arc, Barrier};
+
+    #[tokio::test]
+    async fn staged_promotion_keeps_destination_backup_for_caller_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage = temp.path().join("stage");
+        let destination = temp.path().join("destination");
+        std::fs::write(&stage, b"new").unwrap();
+        std::fs::write(&destination, b"old").unwrap();
+
+        let backup = promote_stage(&stage, &destination, true, true, ".backup")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"old");
+        std::fs::remove_file(backup).unwrap();
+    }
 
     #[test]
     fn concurrent_no_replace_renames_preserve_the_losing_source() {

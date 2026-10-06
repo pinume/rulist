@@ -19,17 +19,14 @@ import {
   RiDocumentFolderUploadFill,
   RiDocumentFileUploadFill,
 } from "solid-icons/ri"
-import { bus, getFileSize, notify, pathJoin } from "~/utils"
-import { asyncPool } from "~/utils/async_pool"
-import { createStore } from "solid-js/store"
+import { bus, getFileSize, notify } from "~/utils"
 import { UploadFileProps, StatusBadge } from "./types"
 import {
-  File2Upload,
   extractFilesFromDataTransfer,
   setUploadListenerActive,
   takePendingFiles,
 } from "./util"
-import { StreamUpload } from "./stream"
+import { createUploadQueue } from "./queue"
 
 const statusText: Record<string, string> = {
   pending: "Pending",
@@ -59,7 +56,12 @@ const UploadFile = (props: UploadFileProps & { onRetry?: () => void }) => (
       </HStack>
       <HStack spacing="$2">
         <Show when={props.status === "error" && props.onRetry}>
-          <Button compact size="xs" colorScheme="accent" onClick={() => props.onRetry?.()}>
+          <Button
+            compact
+            size="xs"
+            colorScheme="accent"
+            onClick={() => props.onRetry?.()}
+          >
             Retry
           </Button>
         </Show>
@@ -79,37 +81,25 @@ const UploadFile = (props: UploadFileProps & { onRetry?: () => void }) => (
   </VStack>
 )
 
-type UploadTask = UploadFileProps & { id: number }
-
 const Upload = () => {
   const { pathname } = useRouter()
   const { refresh } = useFiles()
   const [drag, setDrag] = createSignal(false)
   const [uploading, setUploading] = createSignal(false)
-  const [uploadFiles, setUploadFiles] = createStore<{ uploads: UploadTask[] }>({ uploads: [] })
+  const queue = createUploadQueue(() => {
+    void refresh()
+  })
+  const uploadFiles = queue.state
   const allDone = () =>
-    uploadFiles.uploads.every(({ status }) => ["success", "error"].includes(status))
+    uploadFiles.uploads.every(({ status }) =>
+      ["success", "error"].includes(status),
+    )
   let fileInput!: HTMLInputElement
   let folderInput!: HTMLInputElement
-  const fileMap = new Map<number, File>()
-  let nextUploadId = 0
-
-  const handleAddFiles = async (files: File[]) => {
+  const handleAddFiles = (files: File[]) => {
     if (files.length === 0) return
     setUploading(true)
-    const uploads = files.map((file) => {
-      const upload = { ...File2Upload(file), id: nextUploadId++ }
-      fileMap.set(upload.id, file)
-      setUploadFiles("uploads", (items) => [...items, upload])
-      return { file, upload }
-    })
-    for await (const ms of asyncPool(3, uploads, ({ file, upload }) =>
-      handleFile(upload.id, file),
-    )) {
-      console.log(ms)
-    }
-    refresh()
-    setTimeout(() => refresh(), 5000)
+    queue.add(files, pathname(), uploadConfig.overwrite)
   }
 
   onMount(() => {
@@ -121,48 +111,10 @@ const Upload = () => {
   const onUploadFiles = (files: File[]) => handleAddFiles(files)
   bus.on("upload_files", onUploadFiles)
   onCleanup(() => {
+    queue.dispose()
     setUploadListenerActive(false)
     bus.off("upload_files", onUploadFiles)
   })
-
-  const setUpload = (id: number, key: keyof UploadFileProps, value: any) => {
-    setUploadFiles("uploads", (upload) => upload.id === id, key, value)
-  }
-
-  const retryFile = (id: number) => {
-    const file = fileMap.get(id)
-    if (!file) return
-    setUpload(id, "msg", "")
-    setUpload(id, "progress", 0)
-    setUpload(id, "speed", 0)
-    handleFile(id, file)
-  }
-
-  const handleFile = async (id: number, file: File) => {
-    const path = file.webkitRelativePath || file.name
-    setUpload(id, "status", "uploading")
-    const uploadPath = pathJoin(pathname(), path)
-    try {
-      const err = await StreamUpload(
-        uploadPath,
-        file,
-        (key, value) => setUpload(id, key, value),
-        uploadConfig.overwrite,
-      ).catch((err) => err)
-      if (!err) {
-        setUpload(id, "status", "success")
-        setUpload(id, "progress", 100)
-        fileMap.delete(id)
-      } else {
-        setUpload(id, "status", "error")
-        setUpload(id, "msg", err.message)
-      }
-    } catch (e: any) {
-      console.error(e)
-      setUpload(id, "status", "error")
-      setUpload(id, "msg", e.message)
-    }
-  }
 
   return (
     <VStack w="$full" pb="$2" spacing="$2">
@@ -171,26 +123,22 @@ const Upload = () => {
         fallback={
           <>
             <HStack spacing="$2">
-              <Button
-                colorScheme="accent"
-                onClick={() => {
-                  const completed = uploadFiles.uploads.filter(({ status }) =>
-                    ["success", "error"].includes(status),
-                  )
-                  for (const upload of completed) fileMap.delete(upload.id)
-                  setUploadFiles("uploads", (items) =>
-                    items.filter(({ status }) => !["success", "error"].includes(status)),
-                  )
-                }}
-              >
+              <Button colorScheme="accent" onClick={queue.clearCompleted}>
                 Clear completed
               </Button>
               <Show when={allDone()}>
-                <Button onClick={() => setUploading(false)}>Back to upload</Button>
+                <Button onClick={() => setUploading(false)}>
+                  Back to upload
+                </Button>
               </Show>
             </HStack>
             <For each={uploadFiles.uploads}>
-              {(upload) => <UploadFile {...upload} onRetry={() => retryFile(upload.id)} />}
+              {(upload) => (
+                <UploadFile
+                  {...upload}
+                  onRetry={() => queue.retry(upload.id)}
+                />
+              )}
             </For>
           </>
         }
@@ -200,7 +148,9 @@ const Upload = () => {
           multiple
           ref={fileInput}
           display="none"
-          onChange={(e) => handleAddFiles(Array.from(e.currentTarget.files ?? []))}
+          onChange={(e) =>
+            handleAddFiles(Array.from(e.currentTarget.files ?? []))
+          }
         />
         <Input
           type="file"
@@ -209,7 +159,9 @@ const Upload = () => {
           webkitdirectory
           ref={folderInput}
           display="none"
-          onChange={(e) => handleAddFiles(Array.from(e.currentTarget.files ?? []))}
+          onChange={(e) =>
+            handleAddFiles(Array.from(e.currentTarget.files ?? []))
+          }
         />
         <VStack
           w="$full"
@@ -228,7 +180,14 @@ const Upload = () => {
             e.preventDefault()
             e.stopPropagation()
             setDrag(false)
-            const files = await extractFilesFromDataTransfer(e.dataTransfer)
+            let files: File[]
+            try {
+              files = await extractFilesFromDataTransfer(e.dataTransfer)
+            } catch (error) {
+              console.error("Failed to read dropped files", error)
+              notify.error("Failed to read dropped files.")
+              return
+            }
             if (files.length === 0) {
               notify.warning("No files were dragged in.")
               return
@@ -250,7 +209,9 @@ const Upload = () => {
                   icon={<RiDocumentFolderUploadFill size="1.2em" />}
                   onClick={() => folderInput.click()}
                 />
-                <Text fontSize="$sm" color="$neutral11" textAlign="center">Select folder</Text>
+                <Text fontSize="$sm" color="$neutral11" textAlign="center">
+                  Select folder
+                </Text>
               </VStack>
               <VStack spacing="$2" alignItems="center">
                 <IconButton
@@ -260,7 +221,9 @@ const Upload = () => {
                   icon={<RiDocumentFileUploadFill size="1.2em" />}
                   onClick={() => fileInput.click()}
                 />
-                <Text fontSize="$sm" color="$neutral11" textAlign="center">Select files</Text>
+                <Text fontSize="$sm" color="$neutral11" textAlign="center">
+                  Select files
+                </Text>
               </VStack>
             </HStack>
             <Stack
@@ -270,7 +233,9 @@ const Upload = () => {
               <Show when={can("overwrite")}>
                 <Checkbox
                   checked={uploadConfig.overwrite}
-                  onChange={() => setUploadConfig({ overwrite: !uploadConfig.overwrite })}
+                  onChange={() =>
+                    setUploadConfig({ overwrite: !uploadConfig.overwrite })
+                  }
                 >
                   Overwrite existing files
                 </Checkbox>

@@ -15,3 +15,5 @@ export const can = (permission: Permission) => {
 }
 
 export { currentUser, setCurrentUser }
+
+export const [sessionExpired, setSessionExpired] = createSignal(false)

@@ -6,20 +6,27 @@ import { FileEntry } from "~/types"
 export const collectDownloadFiles = async (
   root: string,
   selected: FileEntry[],
+  signal?: AbortSignal,
 ): Promise<{ path: string }[]> => {
-  const pending = selected.map((file) => ({ path: file.name, is_dir: file.is_dir })).reverse()
+  const pending = selected
+    .map((file) => ({ path: file.name, is_dir: file.is_dir }))
+    .reverse()
   const files: { path: string }[] = []
   // ponytail: one directory request at a time; use a bounded worker pool if enumeration is slow.
   while (pending.length > 0) {
+    signal?.throwIfAborted()
     const entry = pending.pop()!
     if (!entry.is_dir) {
       files.push({ path: entry.path })
       continue
     }
-    const resp = await fsList(pathJoin(root, entry.path))
+    const resp = await fsList(pathJoin(root, entry.path), { signal })
     if (resp.code !== 200) throw new Error(resp.message)
     for (const item of [...(resp.data.content ?? [])].reverse()) {
-      pending.push({ path: pathJoin(entry.path, item.name), is_dir: item.is_dir })
+      pending.push({
+        path: pathJoin(entry.path, item.name),
+        is_dir: item.is_dir,
+      })
     }
   }
   return files
@@ -32,8 +39,11 @@ export const startDownload = (rawUrl: string, name: string) => {
   anchor.click()
 }
 
-export const getFreshDownloadUrl = async (path: string): Promise<string> => {
-  const resp = await fsLink(path)
+export const getFreshDownloadUrl = async (
+  path: string,
+  signal?: AbortSignal,
+): Promise<string> => {
+  const resp = await fsLink(path, signal)
   if (resp.code !== 200) throw new Error(resp.message)
   const raw = resp.data.url
   return raw.startsWith("http://") || raw.startsWith("https://")

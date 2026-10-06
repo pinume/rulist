@@ -15,7 +15,11 @@ import { CgFolderAdd } from "solid-icons/cg"
 export const CreateFolderButton = (props: { handler?: FolderTreeHandler }) => {
   if (!can("write_content")) return null
   return (
-    <Button leftIcon={<CgFolderAdd />} size="sm" onClick={() => props.handler?.startCreateFolder()}>
+    <Button
+      leftIcon={<CgFolderAdd />}
+      size="sm"
+      onClick={() => props.handler?.startCreateFolder()}
+    >
       New folder
     </Button>
   )
@@ -77,13 +81,14 @@ const CopyMoveModal = (props: { action: "copy" | "move" }) => {
           : skipExisting()
             ? "skip"
             : "cancel"
+        const src = pathname()
         const resp = await ok(
-          pathname(),
+          src,
           dst,
           selectedFiles().map((obj) => obj.name),
           policy,
         )
-        refresh()
+        refresh([src, dst])
         handleRespWithNotifySuccess(resp, onClose)
       }}
     />

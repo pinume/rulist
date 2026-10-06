@@ -10,6 +10,7 @@ pub enum FsError {
     Forbidden,
     NotFound,
     Conflict,
+    TooLarge,
 }
 
 impl std::fmt::Display for FsError {
@@ -19,11 +20,54 @@ impl std::fmt::Display for FsError {
             Self::Forbidden => "filesystem access denied",
             Self::NotFound => "filesystem entry not found",
             Self::Conflict => "filesystem entry already exists",
+            Self::TooLarge => "maximum upload size exceeded",
         })
     }
 }
 
 impl std::error::Error for FsError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConflictPolicy {
+    #[default]
+    Cancel,
+    Overwrite,
+    Skip,
+}
+
+#[derive(Debug)]
+pub struct BatchError {
+    pub completed: usize,
+    pub path: Option<String>,
+    pub cause: anyhow::Error,
+}
+
+impl From<anyhow::Error> for BatchError {
+    fn from(cause: anyhow::Error) -> Self {
+        Self {
+            completed: 0,
+            path: None,
+            cause,
+        }
+    }
+}
+
+impl std::fmt::Display for BatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "batch failed after {} item(s): {}",
+            self.completed, self.cause
+        )
+    }
+}
+
+impl std::error::Error for BatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
 
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
@@ -42,9 +86,7 @@ pub struct FileEntry {
     pub size: i64,
     pub is_dir: bool,
     pub modified: String,
-    pub sign: String,
     pub r#type: i32,
-    pub raw_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<String>,
 }
@@ -68,9 +110,7 @@ impl FileEntry {
             size,
             is_dir,
             modified: modified.into(),
-            sign: String::new(),
             r#type: file_type,
-            raw_url: String::new(),
             permissions: None,
         }
     }
@@ -191,18 +231,87 @@ pub fn sorted_file_page(
     page: usize,
     per_page: usize,
 ) -> Vec<FileEntry> {
+    select_page(files, page, per_page, |a, b| {
+        compare_files(a, b, order_by, reverse)
+    })
+    .to_vec()
+}
+
+pub(crate) fn sorted_snapshot_page(
+    files: &[FileEntry],
+    order_by: Option<&str>,
+    reverse: bool,
+    page: usize,
+    per_page: usize,
+) -> Vec<FileEntry> {
+    let mut indexes: Vec<usize> = (0..files.len()).collect();
+    select_page(&mut indexes, page, per_page, |&a, &b| {
+        compare_files(&files[a], &files[b], order_by, reverse)
+    })
+    .iter()
+    .map(|&index| files[index].clone())
+    .collect()
+}
+
+fn select_page<T>(
+    files: &mut [T],
+    page: usize,
+    per_page: usize,
+    compare: impl Fn(&T, &T) -> Ordering,
+) -> &[T] {
     let start = page.saturating_sub(1).saturating_mul(per_page);
     if start >= files.len() {
-        return Vec::new();
+        return &[];
     }
     let end = start.saturating_add(per_page).min(files.len());
 
     if end < files.len() {
-        files.select_nth_unstable_by(end, |a, b| compare_files(a, b, order_by, reverse));
+        files.select_nth_unstable_by(end, &compare);
     }
     if start > 0 {
-        files[..end].select_nth_unstable_by(start, |a, b| compare_files(a, b, order_by, reverse));
+        files[..end].select_nth_unstable_by(start, &compare);
     }
-    files[start..end].sort_unstable_by(|a, b| compare_files(a, b, order_by, reverse));
-    files[start..end].to_vec()
+    files[start..end].sort_unstable_by(compare);
+    &files[start..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_pages_match_full_sort_without_changing_the_snapshot() {
+        let files: Vec<_> = (0..301)
+            .rev()
+            .map(|i| FileEntry::new(format!("item{i}"), i, i % 7 == 0, format!("{i:04}")))
+            .collect();
+        for order in ["name", "size", "modified"] {
+            for reverse in [false, true] {
+                let mut sorted = files.clone();
+                sort_files_by(&mut sorted, Some(order), reverse);
+                for (page, size) in [
+                    (0, 50),
+                    (1, 0),
+                    (1, 50),
+                    (3, 50),
+                    (7, 50),
+                    (8, 50),
+                    (usize::MAX, 100),
+                ] {
+                    let actual = sorted_snapshot_page(&files, Some(order), reverse, page, size);
+                    let start = page.saturating_sub(1).saturating_mul(size).min(files.len());
+                    let end = start.saturating_add(size).min(files.len());
+                    assert_eq!(
+                        actual.iter().map(|f| &f.name).collect::<Vec<_>>(),
+                        sorted[start..end]
+                            .iter()
+                            .map(|f| &f.name)
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+        assert_eq!(files[0].name, "item300");
+        assert!(sorted_snapshot_page(&[], None, false, 1, 100).is_empty());
+    }
 }

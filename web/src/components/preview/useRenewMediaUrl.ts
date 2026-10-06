@@ -1,37 +1,41 @@
 import { createEffect, createSignal } from "solid-js"
 import { PreviewResponse, Resp } from "~/types"
-import { r } from "~/utils"
-
-const isExpired = (rawUrl: string) => {
-  const sign = new URL(rawUrl, window.location.href).searchParams.get("sign")
-  const expires = Number(sign?.slice(sign.lastIndexOf(":") + 1))
-  return Number.isFinite(expires) && expires > 0 && expires < Date.now() / 1000
-}
+import { r } from "../../utils/request"
 
 export const useRenewMediaUrl = (
   path: () => string,
   initialUrl: () => string,
 ) => {
   const [rawUrl, setRawUrl] = createSignal(initialUrl())
-  let renewedUrl = ""
+  let renewedSource = ""
 
   createEffect(() => setRawUrl(initialUrl()))
 
   const onError = async (event: Event) => {
     const currentUrl = rawUrl()
-    if (renewedUrl === currentUrl || !isExpired(currentUrl)) return
-    renewedUrl = currentUrl
+    const currentPath = path()
+    const source = `${currentPath}:${initialUrl()}`
+    if (renewedSource === source) return
+    renewedSource = source
 
     const media = event.currentTarget as HTMLMediaElement
     const currentTime = media.currentTime
     const wasPlaying = !media.paused
     const resp: Resp<PreviewResponse> = await r.post("/fs/preview", {
-      path: path(),
+      path: currentPath,
     })
     const nextUrl = resp.code === 200 ? resp.data?.meta?.raw_url : undefined
+    if (
+      path() !== currentPath ||
+      rawUrl() !== currentUrl ||
+      source !== `${path()}:${initialUrl()}`
+    )
+      return
     if (!nextUrl || nextUrl === currentUrl) return
 
     const restore = () => {
+      if (path() !== currentPath || rawUrl() !== nextUrl) return
+      renewedSource = ""
       media.currentTime = currentTime
       if (wasPlaying) void media.play().catch(() => {})
     }

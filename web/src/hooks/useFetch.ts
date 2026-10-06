@@ -1,32 +1,31 @@
 import { Accessor, createSignal } from "solid-js"
-import { EmptyResp, PResp } from "~/types"
+import { sessionExpired } from "../store/session"
 
-export const useLoading = <T>(
-  p: (...arg: any[]) => Promise<T>,
-  fetch?: boolean,
-  t?: boolean, // initial loading true
-): [Accessor<typeof t>, typeof p] => {
-  const [loading, setLoading] = createSignal(t)
+export const useLoading = <Args extends unknown[], Result>(
+  run: (...args: Args) => Promise<Result>,
+  initial = false,
+): [Accessor<boolean>, typeof run] => {
+  const [loading, setLoading] = createSignal(initial)
+  let active = 0
   return [
     loading,
-    async (...arg: any[]) => {
+    async (...args: Args) => {
+      active++
       setLoading(true)
-      const data = await p(...arg)
-      if (!fetch || (data as EmptyResp).code !== 401) {
-        // why?
-        // because if setLoading(false) here will rerender before navigate
-        // maybe cause some bugs
-        setLoading(false)
+      try {
+        return await run(...args)
+      } finally {
+        setLoading(--active > 0)
       }
-      return data
     },
   ]
 }
 
-// Used together with handleResp
-export const useFetch = <T>(
-  p: (...arg: any[]) => Promise<T>,
-  loading?: boolean,
-): [Accessor<typeof loading>, typeof p] => {
-  return useLoading(p, true, loading)
+export const useFetch = <Args extends unknown[], Result>(
+  run: (...args: Args) => Promise<Result>,
+  initial = false,
+): [Accessor<boolean>, typeof run] => {
+  const [loading, fetch] = useLoading(run, initial)
+  // Session expiry owns the protected-view state while routing to login.
+  return [() => loading() || sessionExpired(), fetch]
 }

@@ -39,13 +39,26 @@ const getDataHelper = (byteLength) => {
   }
 }
 
+// ZIP32 uses 32-bit sizes and offsets; 0xffffffff is the ZIP64 sentinel.
+const checkSize = (size) => {
+  if (size >= 0xffffffff) throw new Error("Archive exceeds the ZIP size limit")
+}
+
 const pump = (zipObj) =>
   zipObj.reader.read().then((chunk) => {
+    if (zipObj.cancelled) return
     if (chunk.done) return zipObj.writeFooter()
     const outputData = chunk.value
     zipObj.crc.append(outputData)
     zipObj.uncompressedLength += outputData.length
     zipObj.compressedLength += outputData.length
+    checkSize(
+      30 +
+        zipObj.nameBuf.length +
+        zipObj.offset +
+        zipObj.uncompressedLength +
+        16,
+    )
     zipObj.ctrl.enqueue(outputData)
   })
 
@@ -54,7 +67,7 @@ const pump = (zipObj) =>
  * @param  {Object} underlyingSource [description]
  * @return {Boolean}                  [description]
  */
-function createWriter(underlyingSource) {
+export default function createWriter(underlyingSource) {
   const files = Object.create(null)
   const filenames = []
   const encoder = new TextEncoder()
@@ -77,7 +90,9 @@ function createWriter(underlyingSource) {
           "Cannot enqueue a chunk into a readable stream that is closed or has been requested to be closed",
         )
 
-      let name = fileLike.name.trim()
+      if (filenames.length >= 65534)
+        throw new Error("Archive exceeds the ZIP entry limit")
+      let name = fileLike.name
       const date = new Date(
         typeof fileLike.lastModified === "undefined"
           ? Date.now()
@@ -88,6 +103,8 @@ function createWriter(underlyingSource) {
       if (files[name]) throw new Error("File already exists.")
 
       const nameBuf = encoder.encode(name)
+      if (nameBuf.length > 65535)
+        throw new Error("Archive filename is too long")
       filenames.push(name)
 
       const zipObject = (files[name] = {
@@ -125,10 +142,12 @@ function createWriter(underlyingSource) {
           data.view.setUint32(0, 0x504b0304)
           data.array.set(header.array, 4)
           data.array.set(nameBuf, 30)
+          checkSize(offset + data.array.length)
           offset += data.array.length
           ctrl.enqueue(data.array)
         },
         writeFooter() {
+          checkSize(offset + zipObject.compressedLength + 16)
           var footer = getDataHelper(16)
           footer.view.setUint32(0, 0x504b0708)
 
@@ -179,6 +198,7 @@ function createWriter(underlyingSource) {
       file = files[filenames[indexFilename]]
       length += 46 + file.nameBuf.length + file.comment.length
     }
+    checkSize(offset + length + 22)
     const data = getDataHelper(length + 22)
     for (indexFilename = 0; indexFilename < filenames.length; indexFilename++) {
       file = files[filenames[indexFilename]]
@@ -227,7 +247,11 @@ function createWriter(underlyingSource) {
           Promise.resolve(underlyingSource.pull(zipWriter)))
       )
     },
+    cancel(reason) {
+      closed = true
+      if (activeZipObject) activeZipObject.cancelled = true
+      underlyingSource.cancel && underlyingSource.cancel(reason)
+      return activeZipObject?.reader?.cancel(reason)
+    },
   })
 }
-
-window.ZIP = createWriter

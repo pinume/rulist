@@ -46,32 +46,16 @@ test("file loading waits for listings and ignores superseded work", async () => 
             ) {
               return "\0test-router"
             }
-            if (
-              id === "./notify" &&
-              importer?.endsWith("/utils/handle_resp.ts")
-            ) {
-              return "\0test-notify"
-            }
           },
           load(id) {
             if (id === "\0test-router") {
               return 'export const useRouter = () => ({ pathname: () => "/unknown" })'
-            }
-            if (id === "\0test-notify") {
-              return "export const notify = { success() {}, error() {} }"
-            }
-          },
-          transform(_code, id) {
-            // Keep the real API and response handling without importing browser UI.
-            if (id.endsWith("/utils/index.ts")) {
-              return 'export * from "./api"; export * from "./request"; export * from "./path"; export * from "./handle_resp"'
             }
           },
         },
       ],
     })
     const files = await server.ssrLoadModule("/src/store/files.ts")
-    const history = await server.ssrLoadModule("/src/store/history.ts")
     const { r } = await server.ssrLoadModule("/src/utils/request.ts")
     const { useFiles } = await server.ssrLoadModule("/src/hooks/useFiles.ts")
     const requests: { url: string; data: any; respond: (data: any) => void }[] =
@@ -135,25 +119,29 @@ test("file loading waits for listings and ignores superseded work", async () => 
     await older
     assert.equal(files.fileStore.files[0].name, "new.txt")
 
-    // A new navigation must also cancel pending history restoration.
-    history.recordHistory("/newer")
+    // Leaving a completed view records history without caller coordination.
+    const leaving = hook.loadPath("/different.txt")
+    await tick()
+    requests[6].respond({ name: "different.txt", is_dir: false })
+    await leaving
     const recovering = hook.loadPath("/newer")
     const navigating = hook.loadFolder("/destination")
     await tick()
     assert.equal(files.fileStore.state, files.ViewState.Loading)
-    requests[6].respond({ content: [{ name: "destination.txt" }], total: 1 })
+    requests[7].respond({ content: [{ name: "destination.txt" }], total: 1 })
     await Promise.all([recovering, navigating])
     assert.equal(files.fileStore.files[0].name, "destination.txt")
     assert.equal(scrolls, 1)
 
-    // Invalidation after restoring state must still prevent stale scrolling.
-    history.recordHistory("/destination")
+    // Invalidation after restoring state must prevent stale scrolling too.
+    await hook.loadPath("/different.txt")
+    assert.equal(scrolls, 2)
     const scrolling = hook.loadPath("/destination")
     await tick()
     files.resetFileState()
     await scrolling
     assert.equal(files.fileStore.state, files.ViewState.Initial)
-    assert.equal(scrolls, 1)
+    assert.equal(scrolls, 2)
 
     const { collectDownloadFiles } = await server.ssrLoadModule(
       "/src/utils/download.ts",

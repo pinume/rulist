@@ -24,7 +24,11 @@ const isOfficeFile = (path: string) =>
 
 const File = () => {
   const { pathname } = useRouter()
-  const [preview] = createResource(pathname, fetchPreview)
+  const [preview] = createResource(
+    () => (isOfficeFile(pathname()) ? false : pathname()),
+    fetchPreview,
+  )
+  const meta = () => (isOfficeFile(pathname()) ? undefined : preview()?.meta)
 
   return (
     <Switch>
@@ -39,10 +43,10 @@ const File = () => {
           <Spinner size="xl" thickness="3px" color="$accent9" />
         </VStack>
       </Match>
-      <Match when={!isOfficeFile(pathname()) && preview()?.meta}>
+      <Match when={meta()}>
         <FilePreviewLayout
           path={pathname()}
-          meta={preview()!.meta}
+          meta={meta()!}
           content={preview()!.content}
           error={preview()!.error}
         />
@@ -57,16 +61,15 @@ const File = () => {
           spacing="$3"
         >
           <Text fontWeight="$medium">
-            {preview()?.meta?.name || fileStore.file.name}
+            {meta()?.name || fileStore.file.name}
           </Text>
           <Text color="$neutral10">
-            {getFileSize(preview()?.meta?.size || fileStore.file.size)}
+            {getFileSize(meta()?.size || fileStore.file.size)}
           </Text>
           <Button
             onClick={() => {
-              const path = preview()?.meta?.path || pathname()
-              const name =
-                preview()?.meta?.name || fileStore.file.name || "download"
+              const path = meta()?.path || pathname()
+              const name = meta()?.name || fileStore.file.name || "download"
               void downloadPath(path, name).catch((err) =>
                 notify.error(err instanceof Error ? err.message : String(err)),
               )

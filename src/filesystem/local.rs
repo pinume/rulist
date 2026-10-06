@@ -1,13 +1,14 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
+use std::future::Future;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::fs;
 
-use crate::filesystem::{FileEntry, FsError, valid_name};
+use crate::filesystem::{BatchError, ConflictPolicy, FileEntry, FsError, valid_name};
 
 use super::ops::{
     copy_path_safe, entry_exists, move_path_safe, remove_path_recursive, rename_no_replace,
@@ -21,7 +22,7 @@ struct CachedListing {
     show_hidden: bool,
     stamp: (u64, u64, i64, i64, i64, i64),
     created: Instant,
-    files: Vec<FileEntry>,
+    files: Arc<[FileEntry]>,
 }
 
 struct ListingCache {
@@ -35,10 +36,21 @@ static LISTING_CACHE: Mutex<ListingCache> = Mutex::new(ListingCache {
     entry: None,
 });
 
-pub(crate) struct ListingMutation;
+async fn run_mutation_to_completion<F, T>(operation: F) -> Result<T>
+where
+    F: Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    // Keep multi-step mutations alive if the caller drops its request future.
+    tokio::spawn(operation)
+        .await
+        .context("filesystem mutation task failed")?
+}
+
+struct ListingMutation;
 
 impl ListingMutation {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         invalidate_listing_cache();
         Self
     }
@@ -58,8 +70,8 @@ fn invalidate_listing_cache() {
 
 #[derive(Debug, Clone)]
 pub struct LocalFs {
-    pub root_path: PathBuf,
-    pub show_hidden: bool,
+    root_path: PathBuf,
+    show_hidden: bool,
 }
 
 impl LocalFs {
@@ -82,7 +94,7 @@ impl LocalFs {
         !self.show_hidden && name.starts_with('.')
     }
 
-    pub fn safe_resolve(&self, subpath: &str) -> Result<PathBuf> {
+    fn safe_resolve(&self, subpath: &str) -> Result<PathBuf> {
         let clean = subpath.trim_matches('/');
         let mut target = self.root_path.clone();
 
@@ -137,6 +149,10 @@ impl LocalFs {
     }
 
     pub async fn list(&self, subpath: &str) -> Result<Vec<FileEntry>> {
+        Ok(self.list_snapshot(subpath).await?.to_vec())
+    }
+
+    pub(crate) async fn list_snapshot(&self, subpath: &str) -> Result<Arc<[FileEntry]>> {
         let full_path = self.safe_resolve(subpath)?;
         let show_hidden = self.show_hidden;
         let meta = fs::metadata(&full_path).await?;
@@ -156,7 +172,7 @@ impl LocalFs {
                     && entry.stamp == stamp
                     && entry.created.elapsed() < LISTING_CACHE_TTL
                 {
-                    return Ok(entry.files.clone());
+                    return Ok(Arc::clone(&entry.files));
                 }
             }
             cache.generation
@@ -216,6 +232,7 @@ impl LocalFs {
         })
         .await
         .context("directory scan task panicked or failed")??;
+        let items: Arc<[FileEntry]> = items.into();
         if items.len() <= LISTING_CACHE_MAX_ENTRIES {
             let mut cache = LISTING_CACHE.lock().unwrap();
             if cache.generation == generation {
@@ -224,7 +241,7 @@ impl LocalFs {
                     show_hidden,
                     stamp,
                     created: Instant::now(),
-                    files: items.clone(),
+                    files: Arc::clone(&items),
                 });
             }
         }
@@ -275,6 +292,156 @@ impl LocalFs {
             .with_context(|| format!("failed to open file: {:?}", full_path))
     }
 
+    /// Write a complete stream through a hidden staging file. Cancellation or errors
+    /// remove the stage; the destination is only changed after the stream finishes.
+    pub async fn write(
+        &self,
+        subpath: &str,
+        input: impl tokio::io::AsyncRead + Unpin,
+        overwrite: bool,
+    ) -> Result<()> {
+        self.write_limited(subpath, input, overwrite, 100 * 1024 * 1024 * 1024)
+            .await
+    }
+
+    async fn write_limited(
+        &self,
+        subpath: &str,
+        input: impl tokio::io::AsyncRead + Unpin,
+        overwrite: bool,
+        limit: u64,
+    ) -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _mutation = ListingMutation::new();
+        if subpath.trim_matches('/').is_empty() {
+            return Err(FsError::InvalidPath.into());
+        }
+        let target = self.safe_resolve(subpath)?;
+        if !overwrite && self.entry_exists(subpath).await? {
+            return Err(FsError::Conflict.into());
+        }
+        let parent = target.parent().ok_or(FsError::InvalidPath)?;
+        fs::create_dir_all(parent).await?;
+        let temp =
+            target.with_file_name(format!(".rulist-upload-{}", crate::auth::rand_string(24)));
+        let stage_path = temp.clone();
+        let (mut file, _stage) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&stage_path)?;
+            Ok((fs::File::from_std(file), UploadStage(stage_path)))
+        })
+        .await??;
+        let mut input = input.take(limit + 1);
+        if tokio::io::copy(&mut input, &mut file).await? > limit {
+            return Err(FsError::TooLarge.into());
+        }
+        file.flush().await?;
+        drop(file);
+        // Recheck the parent before publishing; all physical paths stay internal.
+        self.safe_resolve(subpath)?;
+        if overwrite {
+            fs::rename(&temp, &target).await?;
+        } else {
+            fs::hard_link(&temp, &target).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn move_many(
+        &self,
+        src_dir: &str,
+        dst_dir: &str,
+        names: &[String],
+        policy: ConflictPolicy,
+    ) -> std::result::Result<usize, BatchError> {
+        self.transfer_many(src_dir, dst_dir, names, policy, true)
+            .await
+    }
+
+    pub async fn copy_many(
+        &self,
+        src_dir: &str,
+        dst_dir: &str,
+        names: &[String],
+        policy: ConflictPolicy,
+    ) -> std::result::Result<usize, BatchError> {
+        self.transfer_many(src_dir, dst_dir, names, policy, false)
+            .await
+    }
+
+    async fn transfer_many(
+        &self,
+        src_dir: &str,
+        dst_dir: &str,
+        names: &[String],
+        policy: ConflictPolicy,
+        moving: bool,
+    ) -> std::result::Result<usize, BatchError> {
+        let mut unique = std::collections::HashSet::new();
+        let mut transfers = Vec::new();
+        for name in names {
+            if !valid_name(name) || !unique.insert(name) {
+                return Err(anyhow::Error::from(FsError::InvalidPath).into());
+            }
+            let src = format!("{}/{}", src_dir.trim_end_matches('/'), name);
+            let dst = format!("{}/{}", dst_dir.trim_end_matches('/'), name);
+            if src == dst || dst.starts_with(&format!("{src}/")) {
+                return Err(anyhow::Error::from(FsError::InvalidPath).into());
+            }
+            if self.entry_exists(&dst).await? {
+                match policy {
+                    ConflictPolicy::Cancel => {
+                        return Err(anyhow::Error::from(FsError::Conflict).into());
+                    }
+                    ConflictPolicy::Skip => continue,
+                    ConflictPolicy::Overwrite => {}
+                }
+            }
+            transfers.push((src, dst));
+        }
+        let total = transfers.len();
+        for (completed, (src, dst)) in transfers.into_iter().enumerate() {
+            let result = if moving {
+                self.move_to_safe(&src, &dst, policy == ConflictPolicy::Overwrite)
+                    .await
+            } else {
+                self.copy_to_safe(&src, &dst, policy == ConflictPolicy::Overwrite)
+                    .await
+            };
+            if let Err(cause) = result {
+                return Err(BatchError {
+                    completed,
+                    path: Some(src),
+                    cause,
+                });
+            }
+        }
+        Ok(total)
+    }
+
+    pub async fn remove_many(
+        &self,
+        dir: &str,
+        names: &[String],
+    ) -> std::result::Result<usize, BatchError> {
+        if names.iter().any(|name| !valid_name(name)) {
+            return Err(anyhow::Error::from(FsError::InvalidPath).into());
+        }
+        for (completed, name) in names.iter().enumerate() {
+            let path = format!("{}/{}", dir.trim_end_matches('/'), name);
+            if let Err(cause) = self.remove(&path).await {
+                return Err(BatchError {
+                    completed,
+                    path: Some(path),
+                    cause,
+                });
+            }
+        }
+        Ok(names.len())
+    }
+
     pub async fn mkdir(&self, subpath: &str) -> Result<()> {
         let _mutation = ListingMutation::new();
         let full_path = self.safe_resolve(subpath)?;
@@ -294,6 +461,21 @@ impl LocalFs {
     }
 
     pub async fn rename_safe(&self, subpath: &str, new_name: &str, overwrite: bool) -> Result<()> {
+        let fs = self.clone();
+        let subpath = subpath.to_owned();
+        let new_name = new_name.to_owned();
+        run_mutation_to_completion(async move {
+            fs.rename_safe_inner(&subpath, &new_name, overwrite).await
+        })
+        .await
+    }
+
+    async fn rename_safe_inner(
+        &self,
+        subpath: &str,
+        new_name: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         let _mutation = ListingMutation::new();
         if subpath.trim_matches('/').is_empty() {
             return Err(FsError::InvalidPath.into());
@@ -382,6 +564,20 @@ impl LocalFs {
     }
 
     pub async fn batch_rename(
+        &self,
+        src_dir_subpath: &str,
+        pairs: &[(String, String)],
+    ) -> Result<()> {
+        let fs = self.clone();
+        let src_dir_subpath = src_dir_subpath.to_owned();
+        let pairs = pairs.to_vec();
+        run_mutation_to_completion(
+            async move { fs.batch_rename_inner(&src_dir_subpath, &pairs).await },
+        )
+        .await
+    }
+
+    async fn batch_rename_inner(
         &self,
         src_dir_subpath: &str,
         pairs: &[(String, String)],
@@ -489,6 +685,22 @@ impl LocalFs {
         dst_subpath: &str,
         overwrite: bool,
     ) -> Result<()> {
+        let fs = self.clone();
+        let src_subpath = src_subpath.to_owned();
+        let dst_subpath = dst_subpath.to_owned();
+        run_mutation_to_completion(async move {
+            fs.move_to_safe_inner(&src_subpath, &dst_subpath, overwrite)
+                .await
+        })
+        .await
+    }
+
+    async fn move_to_safe_inner(
+        &self,
+        src_subpath: &str,
+        dst_subpath: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         let _mutation = ListingMutation::new();
         if src_subpath.trim_matches('/').is_empty() || dst_subpath.trim_matches('/').is_empty() {
             return Err(FsError::InvalidPath.into());
@@ -508,6 +720,22 @@ impl LocalFs {
         dst_subpath: &str,
         overwrite: bool,
     ) -> Result<()> {
+        let fs = self.clone();
+        let src_subpath = src_subpath.to_owned();
+        let dst_subpath = dst_subpath.to_owned();
+        run_mutation_to_completion(async move {
+            fs.copy_to_safe_inner(&src_subpath, &dst_subpath, overwrite)
+                .await
+        })
+        .await
+    }
+
+    async fn copy_to_safe_inner(
+        &self,
+        src_subpath: &str,
+        dst_subpath: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         let _mutation = ListingMutation::new();
         if src_subpath.trim_matches('/').is_empty() || dst_subpath.trim_matches('/').is_empty() {
             return Err(FsError::InvalidPath.into());
@@ -518,9 +746,63 @@ impl LocalFs {
     }
 }
 
+// Unix unlink also cleans a stage when an async write is cancelled.
+struct UploadStage(PathBuf);
+
+impl Drop for UploadStage {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(%error, path = ?self.0, "failed to remove upload stage");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn interrupted_and_oversized_writes_clean_stages_without_changing_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("file.txt"), b"original").unwrap();
+        let fs = LocalFs::new(temp.path(), false).unwrap();
+        let error = fs
+            .write_limited("file.txt", &b"too large"[..], true, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(error.downcast_ref::<FsError>(), Some(&FsError::TooLarge));
+        assert_eq!(
+            std::fs::read(temp.path().join("file.txt")).unwrap(),
+            b"original"
+        );
+        let (input, _writer) = tokio::io::duplex(8);
+        let write = tokio::spawn(async move { fs.write("file.txt", input, true).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if std::fs::read_dir(temp.path()).unwrap().any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".rulist-upload-")
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        write.abort();
+        assert!(write.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            std::fs::read(temp.path().join("file.txt")).unwrap(),
+            b"original"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
 
     #[tokio::test]
     async fn listing_cache_reuses_scans_and_refreshes_after_changes() {
@@ -529,6 +811,14 @@ mod tests {
         std::fs::write(temp.path().join(".hidden.txt"), b"hidden").unwrap();
         let fs = LocalFs::new(temp.path(), false).unwrap();
 
+        let snapshot = fs.list_snapshot("/").await.unwrap();
+        assert!(Arc::ptr_eq(
+            &snapshot,
+            &fs.list_snapshot("/").await.unwrap()
+        ));
+        let response = fs.list("/").await.unwrap();
+        assert_eq!(snapshot[0].name, "visible.txt");
+        assert_eq!(response[0].name, "visible.txt");
         assert_eq!(fs.list("/").await.unwrap().len(), 1);
         let created = LISTING_CACHE
             .lock()

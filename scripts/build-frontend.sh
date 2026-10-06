@@ -12,10 +12,40 @@ web_root="$repo_root/web"
 )
 
 test -f "$web_root/dist/index.html"
-mkdir -p "$repo_root/public/dist"
-find "$repo_root/public/dist" -mindepth 1 ! -name README.md -delete
-cp -a "$web_root/dist/." "$repo_root/public/dist/"
+build_dir="$(mktemp -d "$repo_root/public/.dist-build.XXXXXX")"
+stage="$build_dir/new"
+backup="$build_dir/old"
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ -d "$backup" && ! -e "$repo_root/public/dist" ]]; then
+    mv "$backup" "$repo_root/public/dist" || status=1
+  fi
+  rm -rf "$build_dir"
+  exit "$status"
+}
+trap cleanup EXIT
+
+mkdir "$stage"
+if [[ -f "$repo_root/public/dist/README.md" ]]; then
+  cp "$repo_root/public/dist/README.md" "$stage/README.md"
+fi
+cp -a "$web_root/dist/." "$stage/"
+test -f "$stage/index.html"
+
+if [[ -e "$repo_root/public/dist" ]]; then
+  mv "$repo_root/public/dist" "$backup"
+fi
+if ! mv "$stage" "$repo_root/public/dist"; then
+  if [[ -d "$backup" ]]; then
+    mv "$backup" "$repo_root/public/dist"
+  fi
+  exit 1
+fi
 test -f "$repo_root/public/dist/index.html"
+rm -rf "$backup"
+trap - EXIT
+rm -rf "$build_dir"
 
 touch "$repo_root/src/static_files.rs"
 

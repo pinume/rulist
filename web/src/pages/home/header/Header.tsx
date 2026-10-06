@@ -19,13 +19,14 @@ import {
   clearDirectoryFilter,
   directoryFilter,
   logos,
+  logoUrl,
   fileStore,
   setDirectoryFilter,
   ViewState,
 } from "~/store"
 import { Container } from "../Container"
 import { LinkWithBase } from "~/components"
-import { authLogout, changeToken, handleResp, notify, pathJoin } from "~/utils"
+import { authLogout, changeToken, handleResp, notify } from "~/utils"
 import { resetSessionState } from "~/store/reset"
 import { useRouter } from "~/hooks"
 import { AddMenu } from "./AddMenu"
@@ -36,13 +37,7 @@ export const Header = () => {
   const [lightLogo, darkLogo] = logos()
   const logo = useColorModeValue(lightLogo, darkLogo)
 
-  const logoSrc = createMemo(() => {
-    const value = logo()
-    if (/^(?:https?:)?\/\//.test(value) || /^(?:data|blob):/.test(value)) {
-      return value
-    }
-    return pathJoin(value)
-  })
+  const logoSrc = createMemo(() => logoUrl(logo()))
 
   createEffect(on(pathname, () => clearDirectoryFilter()))
 
@@ -107,7 +102,9 @@ export const Header = () => {
               src={logoSrc()}
               h="32px"
               w="auto"
-              fallback={<Image src={pathJoin("favicon.ico")} h="32px" w="auto" />}
+              fallback={
+                <Image src={logoUrl("favicon.ico")} h="32px" w="auto" />
+              }
             />
           </HStack>
           <HStack spacing="$2" alignItems="center">
@@ -117,7 +114,9 @@ export const Header = () => {
                 aria-label="Search files on this page"
                 placeholder="Search this page…"
                 value={directoryFilter()}
-                onInput={(event) => setDirectoryFilter(event.currentTarget.value)}
+                onInput={(event) =>
+                  setDirectoryFilter(event.currentTarget.value)
+                }
                 w={{ "@initial": "150px", "@sm": "260px", "@md": "360px" }}
                 size="sm"
               />

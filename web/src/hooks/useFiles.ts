@@ -1,163 +1,23 @@
-import axios, { Canceler } from "axios"
 import {
-  FileStore,
-  LIST_PAGE_SIZE,
-  OrderBy,
-  ViewState,
-  loadSortState,
-  getHistoryKey,
-  hasHistory,
-  recoverHistory,
-  clearHistory,
-  shouldKeepState,
-  fileStore,
-  getFileRequestGeneration,
-  invalidateFileRequests,
-  isKnownDirectoryPath,
-  rememberDirectoryPath as rememberKnownDirectoryPath,
-} from "~/store"
-import { fsGet, fsList, handleRespWithoutNotify, pathJoin } from "~/utils"
-import { useFetch } from "./useFetch"
+  loadPath,
+  loadFolder,
+  sortFolder,
+  refreshFiles,
+  rememberDirectoryPath,
+} from "../store/files"
+import { pathJoin } from "../utils/path"
 import { useRouter } from "./useRouter"
-
-let cancelFile: Canceler
-let cancelList: Canceler
 
 export const useFiles = () => {
   const { pathname } = useRouter()
-  const [, getFile] = useFetch((path: string) =>
-    fsGet(
-      path,
-      new axios.CancelToken((c) => {
-        cancelFile = c
-      }),
-    ),
-  )
-  const [, listFiles] = useFetch(
-    (arg?: {
-      path: string
-      page?: number
-      orderBy?: OrderBy
-      reverse?: boolean
-    }) => {
-      return fsList(
-        arg?.path,
-        arg?.page ?? 1,
-        LIST_PAGE_SIZE,
-        new axios.CancelToken((c) => {
-          cancelList = c
-        }),
-        arg?.orderBy ?? fileStore.orderBy,
-        arg?.reverse ?? fileStore.reverse,
-      )
-    },
-  )
-  // set a path must be a dir
-  const rememberDirectory = (path: string, dir = true, push = false) => {
-    if (push) {
-      path = pathJoin(pathname(), path)
-    }
-    if (dir) {
-      rememberKnownDirectoryPath(path, true)
-    } else {
-      rememberKnownDirectoryPath(path, false)
-    }
-  }
-
-  // load a pathname
-  // if confirm current path is dir, fetch List directly
-  // if not, fetch get then determine if it is dir or file
-  const loadPath = (path: string, page = 1) => {
-    invalidateFileRequests()
-    cancelFile?.()
-    cancelList?.()
-    FileStore.setErr("")
-    const { orderBy, reverse } = loadSortState(path)
-    FileStore.setSort(orderBy, reverse)
-    if (hasHistory(path)) {
-      console.log(`handle [${getHistoryKey(path)}] from history`)
-      return recoverHistory(path)
-    } else if (isKnownDirectoryPath(path)) {
-      console.log(`handle [${getHistoryKey(path)}] as folder`)
-      return loadFolder(path, page)
-    } else {
-      console.log(`handle [${getHistoryKey(path)}] as file`)
-      return loadFile(path)
-    }
-  }
-
-  // Load a path whose type is not known yet.
-  const loadFile = async (path: string) => {
-    shouldKeepState() || FileStore.setState(ViewState.Loading)
-    const generation = getFileRequestGeneration()
-    const resp = await getFile(path)
-    if (generation !== getFileRequestGeneration()) return
-    handleRespWithoutNotify(
-      resp,
-      (data) => {
-        FileStore.setFile(data)
-        if (!data.is_dir) {
-          shouldKeepState() || FileStore.setState(ViewState.File)
-        }
-      },
-      handleErr,
-    )
-    if (resp.code === 200 && resp.data.is_dir) {
-      rememberDirectory(path)
-      await loadFolder(path)
-    }
-  }
-
-  // enter a folder
-  const loadFolder = async (
-    path: string,
-    page = 1,
-    orderBy = fileStore.orderBy,
-    reverse = fileStore.reverse,
-  ) => {
-    invalidateFileRequests()
-    shouldKeepState() || FileStore.setState(ViewState.Loading)
-    const generation = getFileRequestGeneration()
-    const resp = await listFiles({ path, page, orderBy, reverse })
-    if (generation !== getFileRequestGeneration()) return
-    if (resp.code === 200) {
-      const lastPage = Math.max(1, Math.ceil(resp.data.total / LIST_PAGE_SIZE))
-      if (page > lastPage) {
-        await loadFolder(path, lastPage, orderBy, reverse)
-        return
-      }
-    }
-    handleRespWithoutNotify(
-      resp,
-      (data) => {
-        rememberKnownDirectoryPath(path, true)
-        for (const item of data.content ?? []) {
-          if (item.is_dir) {
-            rememberKnownDirectoryPath(pathJoin(path, item.name), true)
-          }
-        }
-        FileStore.setListing(data.content ?? [], data.total, page)
-        shouldKeepState() || FileStore.setState(ViewState.Folder)
-      },
-      handleErr,
-    )
-  }
-
-  const handleErr = (msg: string, code?: number) => {
-    if (code === undefined || code >= 0) {
-      FileStore.setErr(msg)
-    }
-  }
   return {
     loadPath,
     loadFolder,
-    rememberDirectory,
-    refresh: async () => {
-      const path = pathname()
-      const scroll = window.scrollY
-      clearHistory(path)
-      await loadPath(path, fileStore.page)
-      window.scroll({ top: scroll, behavior: "smooth" })
-    },
+    sort: (orderBy: Parameters<typeof sortFolder>[1], reverse: boolean) =>
+      sortFolder(pathname(), orderBy, reverse),
+    refresh: (invalidatePaths?: string[]) =>
+      refreshFiles(pathname(), invalidatePaths),
+    rememberDirectory: (path: string, dir = true, push = false) =>
+      rememberDirectoryPath(push ? pathJoin(pathname(), path) : path, dir),
   }
 }

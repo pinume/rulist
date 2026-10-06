@@ -7,7 +7,7 @@ import {
   Tooltip,
   useColorModeValue,
 } from "@hope-ui/solid"
-import { createMemo, createSignal, For } from "solid-js"
+import { createMemo, createSignal, For, Show } from "solid-js"
 import { FiCheck, FiCopy, FiCornerDownLeft } from "solid-icons/fi"
 import { useUtil } from "~/hooks"
 import { PreviewMeta, ProcessedContent } from "~/types"
@@ -20,7 +20,18 @@ export const CodePreview = (props: {
   const [wrap, setWrap] = createSignal(false)
   const [copied, setCopied] = createSignal(false)
 
-  const lines = createMemo(() => (props.content?.value ?? "").split("\n"))
+  const text = () => props.content?.value ?? ""
+  const lineCount = createMemo(() => {
+    const value = text()
+    let count = 1
+    for (let i = 0; i < value.length; i++) {
+      if (value[i] === "\n") count++
+    }
+    return count
+  })
+  // ponytail: large documents omit line numbers; virtualize only if plain text still stalls.
+  const plain = () => lineCount() > 2000 || text().length > 256 * 1024
+  const lines = createMemo(() => (plain() ? [] : text().split("\n")))
 
   const handleCopy = async () => {
     await copy(props.content?.value ?? "")
@@ -33,7 +44,8 @@ export const CodePreview = (props: {
   const lineNumberColor = useColorModeValue("$neutral8", "$neutral9")
   const codeColor = useColorModeValue("$neutral12", "$neutral12")
   const lineHoverBg = useColorModeValue("$neutral2", "$neutral4")
-  const lineNoWidth = () => `${Math.max(2, String(lines().length).length) * 9 + 20}px`
+  const lineNoWidth = () =>
+    `${Math.max(2, String(lineCount()).length) * 9 + 20}px`
 
   return (
     <Box w="$full" bg={bg()}>
@@ -48,7 +60,7 @@ export const CodePreview = (props: {
       >
         <HStack spacing="$2">
           <Badge variant="subtle" colorScheme="info">
-            Lines: {lines().length}
+            Lines: {lineCount()}
           </Badge>
           {props.content?.kind && props.content.kind !== "text" && (
             <Badge variant="outline" colorScheme="neutral">
@@ -57,7 +69,11 @@ export const CodePreview = (props: {
           )}
         </HStack>
         <HStack spacing="$2">
-          <Tooltip label={wrap() ? "Switch to horizontal scrolling" : "Enable line wrapping"}>
+          <Tooltip
+            label={
+              wrap() ? "Switch to horizontal scrolling" : "Enable line wrapping"
+            }
+          >
             <Button
               size="xs"
               variant={wrap() ? "solid" : "outline"}
@@ -87,41 +103,58 @@ export const CodePreview = (props: {
         lineHeight="1.6"
         color={codeColor()}
       >
-        <For each={lines()}>
-          {(line, index) => (
-            <Box
-              display="flex"
-              alignItems="flex-start"
-              _hover={{ bg: lineHoverBg() }}
-              rounded="$xs"
-            >
-              <Box
-                userSelect="none"
-                textAlign="right"
-                w={lineNoWidth()}
-                pr="$3"
-                color={lineNumberColor()}
-                flexShrink={0}
-              >
-                {index() + 1}
-              </Box>
-              <pre
-                style={{
-                  flex: "1",
-                  "min-width": "0",
-                  margin: "0",
-                  "font-family": "inherit",
-                  "font-size": "inherit",
-                  "line-height": "inherit",
-                  "white-space": wrap() ? "pre-wrap" : "pre",
-                  "word-break": wrap() ? "break-word" : "normal",
-                }}
-              >
-                {line.length > 0 ? line : "\n"}
-              </pre>
-            </Box>
-          )}
-        </For>
+        <Show
+          when={plain()}
+          fallback={
+            <For each={lines()}>
+              {(line, index) => (
+                <Box
+                  display="flex"
+                  alignItems="flex-start"
+                  _hover={{ bg: lineHoverBg() }}
+                  rounded="$xs"
+                >
+                  <Box
+                    userSelect="none"
+                    textAlign="right"
+                    w={lineNoWidth()}
+                    pr="$3"
+                    color={lineNumberColor()}
+                    flexShrink={0}
+                  >
+                    {index() + 1}
+                  </Box>
+                  <pre
+                    style={{
+                      flex: "1",
+                      "min-width": "0",
+                      margin: "0",
+                      "font-family": "inherit",
+                      "font-size": "inherit",
+                      "line-height": "inherit",
+                      "white-space": wrap() ? "pre-wrap" : "pre",
+                      "word-break": wrap() ? "break-word" : "normal",
+                    }}
+                  >
+                    {line.length > 0 ? line : "\n"}
+                  </pre>
+                </Box>
+              )}
+            </For>
+          }
+        >
+          <pre
+            style={{
+              margin: "0",
+              "font-family": "inherit",
+              "font-size": "inherit",
+              "white-space": wrap() ? "pre-wrap" : "pre",
+              "word-break": wrap() ? "break-word" : "normal",
+            }}
+          >
+            {text()}
+          </pre>
+        </Show>
       </Box>
     </Box>
   )

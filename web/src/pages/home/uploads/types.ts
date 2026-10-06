@@ -15,4 +15,3 @@ export const StatusBadge = {
   success: "success",
   error: "danger",
 } as const
-export type SetUpload = (key: keyof UploadFileProps, value: any) => void

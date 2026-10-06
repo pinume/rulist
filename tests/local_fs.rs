@@ -14,8 +14,8 @@ async fn rejects_traversal_and_filesystem_root_removal() {
     let temp = tempfile::tempdir().unwrap();
     let driver = driver(temp.path());
 
-    assert!(driver.safe_resolve("../etc/passwd").is_err());
-    assert!(driver.safe_resolve("folder/../../etc").is_err());
+    assert!(driver.get("../etc/passwd").await.is_err());
+    assert!(driver.get("folder/../../etc").await.is_err());
     assert!(driver.remove("").await.is_err());
     assert!(driver.remove("/").await.is_err());
     assert!(temp.path().exists());
@@ -28,7 +28,7 @@ async fn rejects_symlink_escape() {
     std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
     let driver = driver(root.path());
 
-    assert!(driver.safe_resolve("escape/secret.txt").is_err());
+    assert!(driver.get("escape/secret.txt").await.is_err());
     assert!(driver.open("escape/secret.txt").await.is_err());
 }
 
@@ -74,7 +74,7 @@ async fn hidden_paths_follow_show_hidden_policy() {
         .unwrap();
 
     let hidden = driver_with_hidden(temp.path(), false);
-    assert!(hidden.safe_resolve(".secret/file.txt").is_err());
+    assert!(hidden.get(".secret/file.txt").await.is_err());
     assert!(hidden.list(".secret").await.is_err());
     assert!(hidden.mkdir(".created").await.is_err());
     assert!(
@@ -91,7 +91,7 @@ async fn hidden_paths_follow_show_hidden_policy() {
     );
 
     let visible = driver_with_hidden(temp.path(), true);
-    assert!(visible.safe_resolve(".secret/file.txt").is_ok());
+    assert!(visible.get(".secret/file.txt").await.is_ok());
     let entries = visible.list(".secret").await.unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "file.txt");
@@ -128,6 +128,132 @@ async fn copy_and_move_preserve_expected_contents() {
             .unwrap(),
         b"content"
     );
+}
+
+#[tokio::test]
+async fn cancelling_copy_request_does_not_interrupt_staged_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    tokio::fs::create_dir(&source).await.unwrap();
+    for index in 0..512 {
+        tokio::fs::write(source.join(format!("{index:04}.txt")), b"copy")
+            .await
+            .unwrap();
+    }
+    let fs = driver(temp.path());
+    let request_fs = fs.clone();
+    let request =
+        tokio::spawn(async move { request_fs.copy_to_safe("source", "copy", false).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let mut entries = tokio::fs::read_dir(temp.path()).await.unwrap();
+            let mut stage_exists = false;
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".rulist-copy-stage-")
+                {
+                    stage_exists = true;
+                    break;
+                }
+            }
+            if stage_exists {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(mut entries) = tokio::fs::read_dir(temp.path().join("copy")).await {
+                let mut count = 0;
+                while entries.next_entry().await.unwrap().is_some() {
+                    count += 1;
+                }
+                if count == 512 {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(temp.path().join("copy/0511.txt").exists());
+    let mut entries = tokio::fs::read_dir(temp.path()).await.unwrap();
+    let mut root_entries = Vec::new();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        root_entries.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    assert_eq!(root_entries.len(), 2);
+    assert!(
+        !root_entries
+            .iter()
+            .any(|name| name.starts_with(".rulist-copy-stage-"))
+    );
+}
+
+#[tokio::test]
+async fn cancelling_batch_rename_request_finishes_the_staged_rename() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut pairs = Vec::new();
+    for index in 0..128 {
+        let src = format!("{index:04}.txt");
+        let dst = format!("renamed-{index:04}.txt");
+        tokio::fs::write(temp.path().join(&src), b"rename")
+            .await
+            .unwrap();
+        pairs.push((src, dst));
+    }
+    let fs = driver(temp.path());
+    let request_fs = fs.clone();
+    let request_pairs = pairs.clone();
+    let request = tokio::spawn(async move { request_fs.batch_rename("", &request_pairs).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let mut entries = tokio::fs::read_dir(temp.path()).await.unwrap();
+            let mut stage_exists = false;
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".rulist-rename-stage-")
+                {
+                    stage_exists = true;
+                    break;
+                }
+            }
+            if stage_exists {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if pairs.iter().all(|(_, dst)| temp.path().join(dst).exists()) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(pairs.iter().all(|(src, _)| !temp.path().join(src).exists()));
 }
 
 #[tokio::test]

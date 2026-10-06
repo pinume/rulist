@@ -16,8 +16,7 @@ export const DropZone = () => {
   let dragCounter = 0
 
   const canWrite = () =>
-    fileStore.state === ViewState.Folder &&
-    can("write_content")
+    fileStore.state === ViewState.Folder && can("write_content")
 
   const hasOpenModal = () =>
     !!document.querySelector(".hope-modal__overlay, .hope-modal__content")
@@ -68,7 +67,14 @@ export const DropZone = () => {
     resetDrag()
     if (!canWrite() || hasOpenModal() || !isFiles) return
 
-    const files = await extractFilesFromDataTransfer(e.dataTransfer)
+    let files: File[]
+    try {
+      files = await extractFilesFromDataTransfer(e.dataTransfer)
+    } catch (error) {
+      console.error("Failed to read dropped files", error)
+      notify.error("Failed to read dropped files.")
+      return
+    }
     if (files.length === 0) {
       notify.warning("No files were dragged in.")
       return
@@ -125,8 +131,12 @@ export const DropZone = () => {
             <Box color={mainColor()} fontSize="3.5rem">
               <FiUploadCloud />
             </Box>
-            <Heading size="lg">Drop files or folders to upload them to the current directory</Heading>
-            <Text fontSize="$sm" color="$neutral11">{pathname()}</Text>
+            <Heading size="lg">
+              Drop files or folders to upload them to the current directory
+            </Heading>
+            <Text fontSize="$sm" color="$neutral11">
+              {pathname()}
+            </Text>
           </VStack>
         </Box>
       </Show>

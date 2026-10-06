@@ -86,13 +86,29 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
         }}
         cursor="pointer"
         bgColor={props.obj.selected ? colorAlpha(mainColor(), 0.13) : undefined}
+        onMouseDown={(event: MouseEvent) => {
+          const target = event.target as HTMLElement | null
+          if (
+            target?.closest(
+              ".actions, .hope-menu__trigger, .hope-menu__content, .hope-menu__item",
+            )
+          )
+            return
+          if (event.shiftKey || event.ctrlKey || event.metaKey)
+            event.preventDefault()
+        }}
         onClick={(e: MouseEvent) => {
           const target = e.target as HTMLElement | null
-          if (target?.closest(".actions, .hope-menu__trigger, .hope-menu__content, .hope-menu__item")) return
+          if (
+            target?.closest(
+              ".actions, .hope-menu__trigger, .hope-menu__content, .hope-menu__item",
+            )
+          )
+            return
 
           if (e.shiftKey) {
             e.preventDefault()
-            selectRange(props.index)
+            selectRange(props.index, e.ctrlKey || e.metaKey)
             return
           }
           if (e.ctrlKey || e.metaKey) {
@@ -157,7 +173,11 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
               >
                 {props.obj.name}
               </Text>
-              <Text display={{ "@initial": "block", "@md": "none" }} size="xs" color="$neutral10">
+              <Text
+                display={{ "@initial": "block", "@md": "none" }}
+                size="xs"
+                color="$neutral10"
+              >
                 {getFileSize(props.obj.size)} · {formatDate(props.obj.modified)}
               </Text>
             </HStack>
@@ -175,7 +195,9 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
               {props.obj.permissions}
             </Text>
           </Show>
-          <Text textAlign="right" size="sm">{getFileSize(props.obj.size)}</Text>
+          <Text textAlign="right" size="sm">
+            {getFileSize(props.obj.size)}
+          </Text>
         </HStack>
         <Text
           class="modified"
@@ -215,7 +237,12 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
                 <Show when={!props.obj.is_dir || config()?.package_download}>
                   <MenuItem
                     cursor="pointer"
-                    icon={<Icon as={operations.download.icon} color={operations.download.color} />}
+                    icon={
+                      <Icon
+                        as={operations.download.icon}
+                        color={operations.download.color}
+                      />
+                    }
                     onSelect={() => {
                       if (props.obj.is_dir) {
                         selectIndex(props.index, true, true)
@@ -225,7 +252,9 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
                           pathJoin(pathname(), props.obj.name),
                           props.obj.name,
                         ).catch((err) =>
-                          notify.error(err instanceof Error ? err.message : String(err)),
+                          notify.error(
+                            err instanceof Error ? err.message : String(err),
+                          ),
                         )
                       }
                     }}
@@ -236,7 +265,12 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
                 <Show when={can("rename")}>
                   <MenuItem
                     cursor="pointer"
-                    icon={<Icon as={operations.rename.icon} color={operations.rename.color} />}
+                    icon={
+                      <Icon
+                        as={operations.rename.icon}
+                        color={operations.rename.color}
+                      />
+                    }
                     onSelect={() => {
                       selectIndex(props.index, true, true)
                       bus.emit("tool", "rename")
@@ -248,7 +282,12 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
                 <Show when={can("copy")}>
                   <MenuItem
                     cursor="pointer"
-                    icon={<Icon as={operations.copy.icon} color={operations.copy.color} />}
+                    icon={
+                      <Icon
+                        as={operations.copy.icon}
+                        color={operations.copy.color}
+                      />
+                    }
                     onSelect={() => {
                       selectIndex(props.index, true, true)
                       bus.emit("tool", "copy")
@@ -260,7 +299,12 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
                 <Show when={can("move")}>
                   <MenuItem
                     cursor="pointer"
-                    icon={<Icon as={operations.move.icon} color={operations.move.color} />}
+                    icon={
+                      <Icon
+                        as={operations.move.icon}
+                        color={operations.move.color}
+                      />
+                    }
                     onSelect={() => {
                       selectIndex(props.index, true, true)
                       bus.emit("tool", "move")
@@ -272,7 +316,12 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
                 <Show when={can("delete")}>
                   <MenuItem
                     cursor="pointer"
-                    icon={<Icon as={operations.delete.icon} color={operations.delete.color} />}
+                    icon={
+                      <Icon
+                        as={operations.delete.icon}
+                        color={operations.delete.color}
+                      />
+                    }
                     onSelect={() => {
                       selectIndex(props.index, true, true)
                       bus.emit("tool", "delete")

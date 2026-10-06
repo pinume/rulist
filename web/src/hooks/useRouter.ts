@@ -7,8 +7,8 @@ import {
   _mergeSearchString,
 } from "@solidjs/router"
 import { createMemo, untrack } from "solid-js"
-import { encodePath, pathDir, pathJoin } from "~/utils"
-import { clearHistory } from "~/store"
+import { encodePath, pathDir, pathJoin } from "../utils/path"
+import { clearHistory } from "../store/history"
 
 const useRouter = () => {
   const navigate = useNavigate()

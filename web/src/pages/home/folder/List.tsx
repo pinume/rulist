@@ -1,5 +1,5 @@
 import {
-  Button,
+  IconButton,
   Divider,
   HStack,
   Icon,
@@ -10,6 +10,7 @@ import {
   MenuLabel,
   MenuTrigger,
   Text,
+  Tooltip,
   useColorModeValue,
   VStack,
 } from "@hope-ui/solid"
@@ -19,8 +20,6 @@ import {
   countMsg,
   directoryFilter,
   mainColor,
-  saveSortState,
-  FileStore,
   OrderBy,
   fileStore,
   selectAll,
@@ -32,6 +31,7 @@ import { Col, cols, ListItem } from "./ListItem"
 import { bus } from "~/utils"
 import { BsFilter } from "solid-icons/bs"
 import { FiCheck } from "solid-icons/fi"
+import { operations } from "../toolbar/operations"
 
 const columnLabel: Record<string, string> = {
   name: "Name",
@@ -44,14 +44,6 @@ export const ListTitle = (props: {
   initialOrder: OrderBy
   initialReverse: boolean
 }) => {
-  const { pathname } = useRouter()
-  const hasNav = () => pathname().split("/").filter(Boolean).length > 0
-
-  const updateSort = (nextOrder: OrderBy, nextReverse: boolean) => {
-    saveSortState(pathname(), { orderBy: nextOrder, reverse: nextReverse })
-    props.sortCallback(nextOrder, nextReverse)
-  }
-
   const itemProps = (col: Col) => ({
     fontWeight: "semibold",
     fontSize: "$xs",
@@ -62,9 +54,9 @@ export const ListTitle = (props: {
     cursor: "pointer",
     onClick: () => {
       if (col.name === props.initialOrder) {
-        updateSort(col.name as OrderBy, !props.initialReverse)
+        props.sortCallback(col.name as OrderBy, !props.initialReverse)
       } else {
-        updateSort(col.name as OrderBy, false)
+        props.sortCallback(col.name as OrderBy, false)
       }
     },
   })
@@ -78,9 +70,6 @@ export const ListTitle = (props: {
       borderBottom="1px solid"
       borderColor="$neutral4"
       bgColor={useColorModeValue("$neutral2", "$neutral4")()}
-      position="sticky"
-      top={hasNav() ? "96px" : "60px"}
-      zIndex={80}
       borderTopRadius="$xl"
     >
       <HStack w={cols[0].w} spacing="$1">
@@ -134,12 +123,23 @@ export const ListTitle = (props: {
               <MenuLabel fontSize="$xs" color="$neutral9" px="$3" py="$1">
                 Sort by
               </MenuLabel>
-              <MenuItem cursor="pointer" onSelect={() => updateSort("name", fileStore.reverse)}>
-                <HStack w="$full" justifyContent="space-between" alignItems="center">
+              <MenuItem
+                cursor="pointer"
+                onSelect={() => props.sortCallback("name", fileStore.reverse)}
+              >
+                <HStack
+                  w="$full"
+                  justifyContent="space-between"
+                  alignItems="center"
+                >
                   <Text
                     fontSize="$sm"
-                    color={fileStore.orderBy === "name" ? mainColor() : undefined}
-                    fontWeight={fileStore.orderBy === "name" ? "semibold" : "normal"}
+                    color={
+                      fileStore.orderBy === "name" ? mainColor() : undefined
+                    }
+                    fontWeight={
+                      fileStore.orderBy === "name" ? "semibold" : "normal"
+                    }
                   >
                     File name
                   </Text>
@@ -148,12 +148,25 @@ export const ListTitle = (props: {
                   </Show>
                 </HStack>
               </MenuItem>
-              <MenuItem cursor="pointer" onSelect={() => updateSort("modified", fileStore.reverse)}>
-                <HStack w="$full" justifyContent="space-between" alignItems="center">
+              <MenuItem
+                cursor="pointer"
+                onSelect={() =>
+                  props.sortCallback("modified", fileStore.reverse)
+                }
+              >
+                <HStack
+                  w="$full"
+                  justifyContent="space-between"
+                  alignItems="center"
+                >
                   <Text
                     fontSize="$sm"
-                    color={fileStore.orderBy === "modified" ? mainColor() : undefined}
-                    fontWeight={fileStore.orderBy === "modified" ? "semibold" : "normal"}
+                    color={
+                      fileStore.orderBy === "modified" ? mainColor() : undefined
+                    }
+                    fontWeight={
+                      fileStore.orderBy === "modified" ? "semibold" : "normal"
+                    }
                   >
                     Modified
                   </Text>
@@ -168,8 +181,15 @@ export const ListTitle = (props: {
               <MenuLabel fontSize="$xs" color="$neutral9" px="$3" py="$1">
                 Sort order
               </MenuLabel>
-              <MenuItem cursor="pointer" onSelect={() => updateSort(fileStore.orderBy, false)}>
-                <HStack w="$full" justifyContent="space-between" alignItems="center">
+              <MenuItem
+                cursor="pointer"
+                onSelect={() => props.sortCallback(fileStore.orderBy, false)}
+              >
+                <HStack
+                  w="$full"
+                  justifyContent="space-between"
+                  alignItems="center"
+                >
                   <Text
                     fontSize="$sm"
                     color={!fileStore.reverse ? mainColor() : undefined}
@@ -182,8 +202,15 @@ export const ListTitle = (props: {
                   </Show>
                 </HStack>
               </MenuItem>
-              <MenuItem cursor="pointer" onSelect={() => updateSort(fileStore.orderBy, true)}>
-                <HStack w="$full" justifyContent="space-between" alignItems="center">
+              <MenuItem
+                cursor="pointer"
+                onSelect={() => props.sortCallback(fileStore.orderBy, true)}
+              >
+                <HStack
+                  w="$full"
+                  justifyContent="space-between"
+                  alignItems="center"
+                >
                   <Text
                     fontSize="$sm"
                     color={fileStore.reverse ? mainColor() : undefined}
@@ -205,57 +232,95 @@ export const ListTitle = (props: {
 }
 
 const ListLayout = () => {
+  const { sort } = useFiles()
   const { pathname } = useRouter()
-  const { loadFolder } = useFiles()
 
   return (
-    <VStack class="list" w="$full" spacing="$0">
-      <ListTitle
-        sortCallback={(orderBy, reverse) => {
-          FileStore.setSort(orderBy, reverse)
-          void loadFolder(pathname(), 1, orderBy, reverse)
-        }}
-        initialOrder={fileStore.orderBy}
-        initialReverse={fileStore.reverse}
-      />
-      <Show when={selectedMsg()}>
-        <HStack
-          w="$full"
-          px={{ "@initial": "$3", "@md": "$4" }}
-          py="$2"
-          spacing="$3"
-          borderBottom="1px solid"
-          borderColor="$neutral4"
-          bgColor={useColorModeValue("$info2", "$neutral4")()}
-          flexWrap="wrap"
-        >
-          <Text size="sm" fontWeight="semibold" mr="auto">
-            {selectedMsg()}
-          </Text>
-          <Show when={can("copy")}>
-            <Button size="sm" variant="ghost" color={mainColor()} onClick={() => bus.emit("tool", "copy")}>
-              Copy
-            </Button>
-          </Show>
-          <Show when={can("move")}>
-            <Button size="sm" variant="ghost" color={mainColor()} onClick={() => bus.emit("tool", "move")}>
-              Move
-            </Button>
-          </Show>
-          <Show when={can("delete")}>
-            <Button size="sm" variant="ghost" color="$danger9" onClick={() => bus.emit("tool", "delete")}>
-              Delete
-            </Button>
-          </Show>
-          <Button size="sm" variant="ghost" color="$neutral10" onClick={() => selectAll(false)}>
-            Cancel selection
-          </Button>
-        </HStack>
-      </Show>
+    <VStack
+      class="list"
+      w="$full"
+      spacing="$0"
+      onWheel={(event: WheelEvent) => {
+        if (!event.shiftKey || event.ctrlKey || event.metaKey) return
+        event.preventDefault()
+        const scale =
+          event.deltaMode === 1
+            ? 16
+            : event.deltaMode === 2
+              ? window.innerHeight
+              : 1
+        window.scrollBy({
+          top: (event.deltaY || event.deltaX) * scale,
+          behavior: "instant",
+        })
+      }}
+    >
+      <VStack
+        class="list-heading"
+        w="$full"
+        spacing="$0"
+        position="sticky"
+        top={pathname().split("/").filter(Boolean).length ? "100px" : "60px"}
+        zIndex={80}
+      >
+        <ListTitle
+          sortCallback={(orderBy, reverse) => {
+            void sort(orderBy, reverse)
+          }}
+          initialOrder={fileStore.orderBy}
+          initialReverse={fileStore.reverse}
+        />
+        <Show when={selectedMsg()}>
+          <HStack
+            class="selection-actions"
+            w="$full"
+            px={{ "@initial": "$3", "@md": "$4" }}
+            py="$2"
+            spacing="$3"
+            borderBottom="1px solid"
+            borderColor="$neutral4"
+            bgColor={useColorModeValue("$info2", "$neutral4")()}
+          >
+            <For
+              each={
+                [
+                  { key: "copy", label: "Copy" },
+                  { key: "move", label: "Move" },
+                  { key: "delete", label: "Delete" },
+                  { key: "cancel_select", label: "Cancel selection" },
+                ] as const
+              }
+            >
+              {(action) => (
+                <Show when={action.key === "cancel_select" || can(action.key)}>
+                  <Tooltip label={action.label} withArrow>
+                    <IconButton
+                      size="sm"
+                      variant="ghost"
+                      aria-label={action.label}
+                      color={operations[action.key].color ?? "$neutral10"}
+                      icon={
+                        <Icon as={operations[action.key].icon} boxSize="$5" />
+                      }
+                      onClick={() =>
+                        action.key === "cancel_select"
+                          ? selectAll(false)
+                          : bus.emit("tool", action.key)
+                      }
+                    />
+                  </Tooltip>
+                </Show>
+              )}
+            </For>
+          </HStack>
+        </Show>
+      </VStack>
       <For each={visibleFileIndexes()}>
         {(index) => <ListItem obj={fileStore.files[index]} index={index} />}
       </For>
-      <Show when={directoryFilter().trim() && visibleFileIndexes().length === 0}>
+      <Show
+        when={directoryFilter().trim() && visibleFileIndexes().length === 0}
+      >
         <Text size="sm" color="$neutral11" p="$4">
           No matching files on this page
         </Text>
@@ -275,10 +340,16 @@ const ListLayout = () => {
         borderBottomRadius="$xl"
         shadow="$sm"
       >
-        <Text size="xs" color="$neutral10">
-          {directoryFilter().trim()
-            ? `${visibleFileIndexes().length} matches on this page`
-            : countMsg()}
+        <Text
+          class="selection-summary"
+          size="xs"
+          color="$neutral10"
+          aria-live="polite"
+        >
+          {selectedMsg() ||
+            (directoryFilter().trim()
+              ? `${visibleFileIndexes().length} matches on this page`
+              : countMsg())}
         </Text>
       </HStack>
     </VStack>

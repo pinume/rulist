@@ -21,4 +21,11 @@ export const logos = () => {
   return [light || "rulist.svg", dark || light || "rulist-dark.svg"] as const
 }
 
+export const logoUrl = (value: string) => {
+  if (/^(?:https?:)?\/\//.test(value) || /^(?:data|blob):/.test(value)) {
+    return value
+  }
+  return `/${value.replace(/^\/+/, "")}`
+}
+
 export const mainColor = () => config()?.main_color || "#1890ff"

@@ -23,20 +23,13 @@ import {
 } from "~/utils"
 import { Resp } from "~/types"
 import LoginBg from "./LoginBg"
-import { logos } from "~/store"
-import { pathJoin } from "~/utils"
+import { logos, logoUrl } from "~/store"
 import { resetSessionState } from "~/store/reset"
 
 const Login = () => {
   const [lightLogo, darkLogo] = logos()
   const logo = useColorModeValue(lightLogo, darkLogo)
-  const logoSrc = createMemo(() => {
-    const value = logo()
-    if (/^(?:https?:)?\/\//.test(value) || /^(?:data|blob):/.test(value)) {
-      return value
-    }
-    return pathJoin(value)
-  })
+  const logoSrc = createMemo(() => logoUrl(logo()))
   const title = "Sign in"
   useTitle(title)
   const bgColor = useColorModeValue("white", "$neutral3")

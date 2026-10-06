@@ -2,12 +2,13 @@ use axum::extract::{Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 
-use crate::filesystem::{FileEntry, sort_files_by, sorted_file_page};
+use crate::filesystem::{sort_files_by, sorted_snapshot_page};
 use crate::server::{
-    SharedState, api_error, api_success, authenticate_user, normalize_request_path,
+    SharedState, SignedFileEntry, api_error, api_success, authenticate_user,
+    normalize_request_path, signed_file_entry,
 };
 
-use super::{filesystem_error_response, signed_download_url, signed_preview_url, user_fs};
+use super::{filesystem_error_response, signed_download_url, user_fs};
 
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 pub(crate) struct FsListReq {
@@ -24,9 +25,9 @@ pub(crate) struct FsListReq {
 }
 use super::PathReq;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize)]
 pub(crate) struct FsListResp {
-    content: Vec<FileEntry>,
+    content: Vec<SignedFileEntry>,
     total: i64,
 }
 
@@ -39,13 +40,6 @@ pub(crate) struct DirItem {
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct FsLinkResp {
     url: String,
-}
-
-pub(crate) fn sign_context(user: &crate::db::User) -> String {
-    format!(
-        "uid={}:pwd_ts={}:root={}",
-        user.id, user.pwd_ts, user.local_path
-    )
 }
 
 pub(crate) async fn list_handler(
@@ -65,45 +59,47 @@ pub(crate) async fn list_handler(
         Err(_) => return api_error(StatusCode::NOT_FOUND, 404, "File root not found"),
     };
 
-    match fs.list(&path).await {
-        Ok(mut content) => {
-            let total = content.len() as i64;
+    match fs.list_snapshot(&path).await {
+        Ok(snapshot) => {
+            let total = snapshot.len() as i64;
 
-            if let Some(per_page) = req.per_page.filter(|&size| size > 0) {
+            let content = if let Some(per_page) = req.per_page.filter(|&size| size > 0) {
                 let page = req.page.unwrap_or(1).max(1);
-                content = sorted_file_page(
-                    &mut content,
+                sorted_snapshot_page(
+                    &snapshot,
                     req.order_by.as_deref(),
                     req.reverse.unwrap_or(false),
                     page,
                     per_page,
-                );
+                )
             } else {
+                let mut content = snapshot.to_vec();
                 sort_files_by(
                     &mut content,
                     req.order_by.as_deref(),
                     req.reverse.unwrap_or(false),
                 );
-            }
+                content
+            };
 
-            // Attach signs and raw_urls to files
-            for item in &mut content {
-                if !item.is_dir {
-                    let item_path = format!("{}/{}", path.trim_end_matches('/'), item.name);
-                    (item.sign, item.raw_url) = match signed_preview_url(&state, &user, &item_path)
-                    {
-                        Ok((sign, url)) => (sign, url),
-                        Err(err) => {
-                            tracing::error!(error = %err, "failed to sign file path");
-                            return api_error(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                500,
-                                "Signing token is unavailable",
-                            );
-                        }
-                    };
+            let content = match content
+                .into_iter()
+                .map(|entry| {
+                    let item_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+                    signed_file_entry(&state, &user, &item_path, entry)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+            {
+                Ok(content) => content,
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to sign file path");
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        500,
+                        "Signing token is unavailable",
+                    );
                 }
-            }
+            };
 
             let resp = FsListResp { content, total };
             api_success(resp)
@@ -133,25 +129,17 @@ pub(crate) async fn get_handler(
     };
 
     match fs.get(&path).await {
-        Ok(mut file) => {
-            if !file.is_dir {
-                let (sign, raw_url) = match signed_preview_url(&state, &user, &path) {
-                    Ok(signed) => signed,
-                    Err(err) => {
-                        tracing::error!(error = %err, "failed to sign file path");
-                        return api_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            500,
-                            "Signing token is unavailable",
-                        );
-                    }
-                };
-                file.sign = sign;
-                file.raw_url = raw_url;
+        Ok(file) => match signed_file_entry(&state, &user, &path, file) {
+            Ok(file) => api_success(file),
+            Err(err) => {
+                tracing::error!(error = %err, "failed to sign file path");
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    500,
+                    "Signing token is unavailable",
+                )
             }
-
-            api_success(file)
-        }
+        },
         Err(err) => {
             tracing::debug!(path = %path, "failed to get file");
             filesystem_error_response(&err, "get")
@@ -176,7 +164,7 @@ pub(crate) async fn dirs_handler(
         Ok(fs) => fs,
         Err(_) => return api_error(StatusCode::NOT_FOUND, 404, "File root not found"),
     };
-    let files = match fs.list(&path).await {
+    let files = match fs.list_snapshot(&path).await {
         Ok(f) => f,
         Err(err) => {
             tracing::debug!(path = %path, "failed to list dirs");
@@ -185,11 +173,11 @@ pub(crate) async fn dirs_handler(
     };
 
     let dirs: Vec<DirItem> = files
-        .into_iter()
+        .iter()
         .filter(|f| f.is_dir)
         .map(|f| DirItem {
-            name: f.name,
-            modified: f.modified,
+            name: f.name.clone(),
+            modified: f.modified.clone(),
         })
         .collect();
 

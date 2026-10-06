@@ -2,9 +2,7 @@ use axum::extract::{Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 
-use crate::filesystem::FsError;
-use crate::filesystem::local::LocalFs;
-use crate::filesystem::valid_name;
+use crate::filesystem::{BatchError, ConflictPolicy};
 use crate::permissions::{COPY, DELETE, MOVE, OVERWRITE, RENAME, WRITE_CONTENT};
 use crate::server::{
     SharedState, api_error, api_success, authenticate_user, normalize_request_path,
@@ -26,14 +24,6 @@ pub(crate) struct FsDirNamesReq {
     dir: String,
     #[serde(default)]
     names: Vec<String>,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ConflictPolicy {
-    #[default]
-    Cancel,
-    Overwrite,
-    Skip,
 }
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 pub(crate) struct FsMoveCopyReq {
@@ -121,49 +111,28 @@ pub(crate) async fn rename_handler(
     }
 }
 
-fn validate_transfer_paths(src: &str, dst: &str) -> anyhow::Result<()> {
-    let src = src.trim_end_matches('/');
-    let dst = dst.trim_end_matches('/');
-
-    if src == dst {
-        return Err(FsError::InvalidPath.into());
-    }
-
-    if dst.starts_with(&format!("{src}/")) {
-        return Err(FsError::InvalidPath.into());
-    }
-
-    Ok(())
-}
-
-async fn prepare_transfer(
-    fs: &LocalFs,
-    src_dir: &str,
-    dst_dir: &str,
-    names: &[String],
-    policy: ConflictPolicy,
-) -> anyhow::Result<Vec<(String, String)>> {
-    let mut unique_names = std::collections::HashSet::with_capacity(names.len());
-    let mut transfers = Vec::new();
-    for name in names {
-        if !unique_names.insert(name) {
-            return Err(FsError::InvalidPath.into());
-        }
-        let src = format!("{}/{}", src_dir.trim_end_matches('/'), name);
-        let dst = format!("{}/{}", dst_dir.trim_end_matches('/'), name);
-        validate_transfer_paths(&src, &dst)?;
-        if fs.entry_exists(&dst).await? {
-            match policy {
-                ConflictPolicy::Cancel => {
-                    return Err(FsError::Conflict.into());
-                }
-                ConflictPolicy::Skip => continue,
-                ConflictPolicy::Overwrite => {}
+fn batch_response(
+    result: Result<usize, BatchError>,
+    action: &'static str,
+    past: &'static str,
+) -> Response {
+    match result {
+        Ok(_) => api_success(serde_json::Value::Null),
+        Err(error) => match error.path {
+            Some(path) => {
+                let (status, code, _) = filesystem_error_details(&error.cause, action);
+                api_error(
+                    status,
+                    code,
+                    format!(
+                        "{action} failed for {path}; {} item(s) already {past}",
+                        error.completed
+                    ),
+                )
             }
-        }
-        transfers.push((src, dst));
+            None => filesystem_error_response(&error.cause, action),
+        },
     }
-    Ok(transfers)
 }
 
 pub(crate) async fn move_handler(
@@ -179,9 +148,6 @@ pub(crate) async fn move_handler(
     {
         return permission_denied();
     }
-    if req.names.iter().any(|name| !valid_name(name)) {
-        return filesystem_error_response(&FsError::InvalidPath.into(), "move request");
-    }
     let (src_dir, dst_dir) = match (
         normalize_request_path(&req.src_dir),
         normalize_request_path(&req.dst_dir),
@@ -196,26 +162,12 @@ pub(crate) async fn move_handler(
         Err(_) => return api_error(StatusCode::NOT_FOUND, 404, "File root not found"),
     };
 
-    let policy = req.conflict_policy;
-    let moves = match prepare_transfer(&fs, &src_dir, &dst_dir, &req.names, policy).await {
-        Ok(moves) => moves,
-        Err(err) => return filesystem_error_response(&err, "prepare move"),
-    };
-
-    for (completed, (src, dst)) in moves.into_iter().enumerate() {
-        let overwrite = policy == ConflictPolicy::Overwrite;
-        if let Err(err) = fs.move_to_safe(&src, &dst, overwrite).await {
-            let (status, code, _) = filesystem_error_details(&err, "move");
-            tracing::debug!(src = %src, dst = %dst, "failed to move file");
-            return api_error(
-                status,
-                code,
-                format!("Move failed for {src}; {completed} item(s) already moved"),
-            );
-        }
-    }
-
-    api_success(serde_json::Value::Null)
+    batch_response(
+        fs.move_many(&src_dir, &dst_dir, &req.names, req.conflict_policy)
+            .await,
+        "Move",
+        "moved",
+    )
 }
 
 pub(crate) async fn copy_handler(
@@ -231,9 +183,6 @@ pub(crate) async fn copy_handler(
     {
         return permission_denied();
     }
-    if req.names.iter().any(|name| !valid_name(name)) {
-        return filesystem_error_response(&FsError::InvalidPath.into(), "copy request");
-    }
     let (src_dir, dst_dir) = match (
         normalize_request_path(&req.src_dir),
         normalize_request_path(&req.dst_dir),
@@ -248,26 +197,12 @@ pub(crate) async fn copy_handler(
         Err(_) => return api_error(StatusCode::NOT_FOUND, 404, "File root not found"),
     };
 
-    let policy = req.conflict_policy;
-    let copies = match prepare_transfer(&fs, &src_dir, &dst_dir, &req.names, policy).await {
-        Ok(copies) => copies,
-        Err(err) => return filesystem_error_response(&err, "prepare copy"),
-    };
-
-    for (completed, (src, dst)) in copies.into_iter().enumerate() {
-        let overwrite = policy == ConflictPolicy::Overwrite;
-        if let Err(err) = fs.copy_to_safe(&src, &dst, overwrite).await {
-            let (status, code, _) = filesystem_error_details(&err, "copy");
-            tracing::debug!(src = %src, dst = %dst, "failed to copy file");
-            return api_error(
-                status,
-                code,
-                format!("Copy failed for {src}; {completed} item(s) already copied"),
-            );
-        }
-    }
-
-    api_success(serde_json::Value::Null)
+    batch_response(
+        fs.copy_many(&src_dir, &dst_dir, &req.names, req.conflict_policy)
+            .await,
+        "Copy",
+        "copied",
+    )
 }
 
 pub(crate) async fn remove_handler(
@@ -281,9 +216,6 @@ pub(crate) async fn remove_handler(
     if !permitted(&user, DELETE) {
         return permission_denied();
     }
-    if req.names.iter().any(|name| !valid_name(name)) {
-        return filesystem_error_response(&FsError::InvalidPath.into(), "delete request");
-    }
     let dir = match normalize_request_path(&req.dir) {
         Ok(path) => path,
         Err(err) => return filesystem_error_response(&err, "normalize path"),
@@ -292,20 +224,7 @@ pub(crate) async fn remove_handler(
         Ok(fs) => fs,
         Err(_) => return api_error(StatusCode::NOT_FOUND, 404, "File root not found"),
     };
-    for (completed, name) in req.names.into_iter().enumerate() {
-        let target = format!("{}/{}", dir.trim_end_matches('/'), name);
-        if let Err(err) = fs.remove(&target).await {
-            let (status, code, _) = filesystem_error_details(&err, "delete");
-            tracing::debug!(target = %target, "failed to remove target");
-            return api_error(
-                status,
-                code,
-                format!("Delete failed for {target}; {completed} item(s) already deleted"),
-            );
-        }
-    }
-
-    api_success(serde_json::Value::Null)
+    batch_response(fs.remove_many(&dir, &req.names).await, "Delete", "deleted")
 }
 
 pub(crate) async fn batch_rename_handler(

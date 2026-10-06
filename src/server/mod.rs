@@ -1,5 +1,6 @@
 mod auth;
 mod files;
+mod links;
 mod preview;
 mod routes;
 mod security;
@@ -41,7 +42,8 @@ impl<T> ApiResponse<T> {
     }
 }
 
-pub(crate) use files::{filesystem_error_response, signed_preview_url};
+pub(crate) use files::filesystem_error_response;
+pub(crate) use links::{SignedFileEntry, signed_file_entry, signed_preview_url};
 pub use routes::build_app;
 pub(crate) use security::{authenticate_user, encode_url_path, normalize_request_path, permitted};
 
