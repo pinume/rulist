@@ -8,5 +8,3 @@
 *.db-*
 /data
 /verification_report.md
-AGENTS.md
-CLAUDE.md
