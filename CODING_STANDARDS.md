@@ -3,8 +3,9 @@
 本文件仅供审查阶段（Review Agent）查阅，记录 linter 与编译器无法自动校验的架构判断准则。实现阶段（Implementation Agent）无需默认加载。
 
 ## 1. 流式传输与缓存边界 (Streaming & Security)
-- **无鉴权缓存隔离**：带签名、包含 JWT 或用于权限校验的流式响应（`src/server/stream.rs`）严禁启用客户端/中间人 HTTP 缓存（强制 `Cache-Control: no-store` 或私有防泄露策略）。
+- **无鉴权缓存隔离**：带签名、包含 JWT 或用于权限校验的流式响应（`src/server/stream.rs`）严禁启用客户端/中间人 HTTP 缓存（强制 `Cache-Control: private, no-store` 或私有防泄露策略）。流式抽象层（如 `FileStream`）必须在自身接口边界内聚该保护标头，严禁依赖上层路由胶水手工补丁。
 - **签名链路独立**：任何公开签名的资源 URL 不得反向泄露系统底层绝对路径，始终保持对外路径不透明。
+- **签名惰性求值**：公开访问的签名计算与临时凭据签发，必须严格置于目标资源存在性与权限初验之后（或通过惰性 Provider 传入），严禁在短路失败前触发无意义的密码学计算与告警日志。
 
 ## 2. 前端响应式状态 (SolidJS State Management)
 - **单向数据流**：全局状态（`web/src/store/`）由专用 action 函数驱动，禁止在组件视图逻辑中多处随意直接解构赋值或分散 patch。
