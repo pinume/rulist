@@ -73,13 +73,6 @@ pub fn valid_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
 
-pub const TYPE_UNKNOWN: i32 = 0;
-pub const TYPE_FOLDER: i32 = 1;
-pub const TYPE_VIDEO: i32 = 2;
-pub const TYPE_AUDIO: i32 = 3;
-pub const TYPE_TEXT: i32 = 4;
-pub const TYPE_IMAGE: i32 = 5;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub name: String,
@@ -129,11 +122,7 @@ impl FileEntry {
         modified: impl Into<String>,
     ) -> Self {
         let name = name.into();
-        let file_type = if is_dir {
-            TYPE_FOLDER
-        } else {
-            get_file_type(&name)
-        };
+        let file_type = if is_dir { 1 } else { get_file_type(&name) };
 
         Self {
             name,
@@ -147,32 +136,20 @@ impl FileEntry {
 }
 
 pub fn format_mode(mode: u32, is_dir: bool) -> String {
-    let d = if is_dir { 'd' } else { '-' };
-    let r1 = if mode & 0o400 != 0 { 'r' } else { '-' };
-    let w1 = if mode & 0o200 != 0 { 'w' } else { '-' };
-    let x1 = if mode & 0o100 != 0 { 'x' } else { '-' };
-    let r2 = if mode & 0o040 != 0 { 'r' } else { '-' };
-    let w2 = if mode & 0o020 != 0 { 'w' } else { '-' };
-    let x2 = if mode & 0o010 != 0 { 'x' } else { '-' };
-    let r3 = if mode & 0o004 != 0 { 'r' } else { '-' };
-    let w3 = if mode & 0o002 != 0 { 'w' } else { '-' };
-    let x3 = if mode & 0o001 != 0 { 'x' } else { '-' };
-    format!("{d}{r1}{w1}{x1}{r2}{w2}{x2}{r3}{w3}{x3}")
+    let mut s = String::with_capacity(10);
+    s.push(if is_dir { 'd' } else { '-' });
+    for (i, &p) in b"rwxrwxrwx".iter().enumerate() {
+        s.push(if mode & (1 << (8 - i)) != 0 {
+            p as char
+        } else {
+            '-'
+        });
+    }
+    s
 }
 
 pub fn get_file_type(filename: &str) -> i32 {
-    match crate::preview::detect_from_path(filename).0 {
-        crate::preview::PreviewType::Video => TYPE_VIDEO,
-        crate::preview::PreviewType::Audio => TYPE_AUDIO,
-        crate::preview::PreviewType::Image => TYPE_IMAGE,
-        crate::preview::PreviewType::Text
-        | crate::preview::PreviewType::Html
-        | crate::preview::PreviewType::Markdown
-        | crate::preview::PreviewType::Code
-        | crate::preview::PreviewType::Json
-        | crate::preview::PreviewType::Xml => TYPE_TEXT,
-        _ => TYPE_UNKNOWN,
-    }
+    crate::preview::detect_from_path(filename).0.type_code()
 }
 
 pub fn natural_cmp(a: &str, b: &str) -> Ordering {

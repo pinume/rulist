@@ -41,26 +41,6 @@ pub async fn raw_preview_handler(
     stream_file(state, path, query, headers, false).await
 }
 
-pub fn percent_decode(s: &str) -> String {
-    let mut bytes = Vec::with_capacity(s.len());
-    let input = s.as_bytes();
-    let mut i = 0;
-    while i < input.len() {
-        if input[i] == b'%' && i + 2 < input.len() {
-            if let Ok(hex) = std::str::from_utf8(&input[i + 1..i + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    bytes.push(byte);
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-        bytes.push(input[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum StreamError {
     InvalidPath,

@@ -9,14 +9,13 @@ import {
 } from "@hope-ui/solid"
 import { createMemo, createSignal, For, Show } from "solid-js"
 import { FiCheck, FiCopy, FiCornerDownLeft } from "solid-icons/fi"
-import { useUtil } from "~/hooks"
+import { notify } from "~/utils"
 import { PreviewMeta, ProcessedContent } from "~/types"
 
 export const CodePreview = (props: {
   content?: ProcessedContent
   meta?: PreviewMeta
 }) => {
-  const { copy } = useUtil()
   const [wrap, setWrap] = createSignal(false)
   const [copied, setCopied] = createSignal(false)
 
@@ -34,9 +33,16 @@ export const CodePreview = (props: {
   const lines = createMemo(() => (plain() ? [] : text().split("\n")))
 
   const handleCopy = async () => {
-    await copy(props.content?.value ?? "")
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    try {
+      await navigator.clipboard.writeText(props.content?.value ?? "")
+      setCopied(true)
+      notify.success("Copied")
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      notify.error(
+        "Clipboard access was denied. Allow clipboard permission in your browser settings.",
+      )
+    }
   }
 
   const bg = useColorModeValue("white", "$neutral3")

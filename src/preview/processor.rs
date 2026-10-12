@@ -58,16 +58,13 @@ pub async fn process_file(
                     value,
                 })
             }
-            PreviewType::Xml => Ok(ProcessedContent {
-                kind: "xml".to_string(),
-                value: text.to_string(),
-            }),
-            PreviewType::Code => Ok(ProcessedContent {
-                kind: "code".to_string(),
-                value: text.to_string(),
-            }),
-            _ => Ok(ProcessedContent {
-                kind: "text".to_string(),
+            other => Ok(ProcessedContent {
+                kind: match other {
+                    PreviewType::Xml => "xml",
+                    PreviewType::Code => "code",
+                    _ => "text",
+                }
+                .to_string(),
                 value: text.to_string(),
             }),
         }

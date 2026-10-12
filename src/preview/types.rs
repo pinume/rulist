@@ -34,6 +34,21 @@ impl PreviewType {
             PreviewType::Unknown => PreviewStrategy::Unsupported,
         }
     }
+
+    pub fn type_code(&self) -> i32 {
+        match self {
+            PreviewType::Video => 2,
+            PreviewType::Audio => 3,
+            PreviewType::Text
+            | PreviewType::Html
+            | PreviewType::Markdown
+            | PreviewType::Code
+            | PreviewType::Json
+            | PreviewType::Xml => 4,
+            PreviewType::Image => 5,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
