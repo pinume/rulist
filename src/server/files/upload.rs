@@ -9,10 +9,9 @@ use tokio::io::{AsyncRead, ReadBuf};
 
 use super::user_fs;
 use crate::permissions::{OVERWRITE, WRITE_CONTENT};
-use crate::server::stream::percent_decode;
 use crate::server::{
     SharedState, api_error, api_success, authenticate_user, filesystem_error_response,
-    normalize_request_path, permission_denied, permitted,
+    normalize_request_path, percent_decode, permission_denied, permitted,
 };
 
 // HTTP frames are adapted to the filesystem's ordinary AsyncRead interface.

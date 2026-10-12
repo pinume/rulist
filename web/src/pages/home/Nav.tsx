@@ -4,9 +4,11 @@ import {
   BreadcrumbLink,
   BreadcrumbSeparator,
   HStack,
+  useColorModeValue,
 } from "@hope-ui/solid"
 import { Link } from "@solidjs/router"
 import { createMemo, For, Show } from "solid-js"
+import { hairlineBorderColor } from "~/app/theme"
 import { useFiles, useRouter } from "~/hooks"
 import { encodePath, pathJoin } from "~/utils"
 
@@ -21,22 +23,22 @@ export const Nav = () => {
     <Show when={paths().length > 0}>
       <HStack
         position="sticky"
-        top="60px"
+        top="50px"
         zIndex={90}
-        minH="40px"
+        minH="36px"
         py="$1"
-        background="$background"
-        _after={{
-          content: '""',
-          backgroundColor: "$background",
-          position: "absolute",
-          height: "100%",
-          width: "99vw",
-          zIndex: -1,
-          transform: "translateX(-50%)",
-          left: "50%",
-          top: 0,
+        px={{ "@initial": "$2", "@md": "$3" }}
+        rounded="$lg"
+        bgColor={useColorModeValue(
+          "rgba(248, 250, 252, 0.82)",
+          "rgba(9, 9, 11, 0.82)",
+        )()}
+        css={{
+          backdropFilter: "blur(12px)",
+          WebkitBackdropFilter: "blur(12px)",
         }}
+        border="1px solid"
+        borderColor={hairlineBorderColor()}
         w="$full"
       >
         <Breadcrumb class="nav" minW={0} overflow="hidden">

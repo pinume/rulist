@@ -79,7 +79,7 @@ async fn hidden_paths_follow_show_hidden_policy() {
     assert!(hidden.mkdir(".created").await.is_err());
     assert!(
         hidden
-            .rename_safe("visible.txt", ".renamed", false)
+            .rename("visible.txt", ".renamed", false)
             .await
             .is_err()
     );
@@ -109,7 +109,7 @@ async fn copy_and_move_preserve_expected_contents() {
         .await
         .unwrap();
 
-    driver.copy_to("source", "copy").await.unwrap();
+    driver.copy_to("source", "copy", true).await.unwrap();
     assert_eq!(
         tokio::fs::read(temp.path().join("copy/nested/file.txt"))
             .await
@@ -118,7 +118,7 @@ async fn copy_and_move_preserve_expected_contents() {
     );
 
     driver
-        .move_to("copy/nested/file.txt", "moved/file.txt")
+        .move_to("copy/nested/file.txt", "moved/file.txt", true)
         .await
         .unwrap();
     assert!(!temp.path().join("copy/nested/file.txt").exists());
@@ -142,8 +142,7 @@ async fn cancelling_copy_request_does_not_interrupt_staged_mutation() {
     }
     let fs = driver(temp.path());
     let request_fs = fs.clone();
-    let request =
-        tokio::spawn(async move { request_fs.copy_to_safe("source", "copy", false).await });
+    let request = tokio::spawn(async move { request_fs.copy_to("source", "copy", false).await });
 
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -270,7 +269,7 @@ async fn overwrite_is_explicit_for_copy_and_rename() {
 
     assert!(
         driver
-            .copy_to_safe("source.txt", "target.txt", false)
+            .copy_to("source.txt", "target.txt", false)
             .await
             .is_err()
     );
@@ -282,7 +281,7 @@ async fn overwrite_is_explicit_for_copy_and_rename() {
     );
 
     driver
-        .copy_to_safe("source.txt", "target.txt", true)
+        .copy_to("source.txt", "target.txt", true)
         .await
         .unwrap();
     assert_eq!(
@@ -293,11 +292,11 @@ async fn overwrite_is_explicit_for_copy_and_rename() {
     );
 
     driver
-        .copy_to_safe("source.txt", "copy-no-overwrite.txt", false)
+        .copy_to("source.txt", "copy-no-overwrite.txt", false)
         .await
         .unwrap();
     driver
-        .move_to_safe("copy-no-overwrite.txt", "move-no-overwrite.txt", false)
+        .move_to("copy-no-overwrite.txt", "move-no-overwrite.txt", false)
         .await
         .unwrap();
     assert_eq!(
@@ -315,7 +314,7 @@ async fn overwrite_is_explicit_for_copy_and_rename() {
         .unwrap();
     assert!(
         driver
-            .move_to_safe("move-source.txt", "move-target.txt", false)
+            .move_to("move-source.txt", "move-target.txt", false)
             .await
             .is_err()
     );
@@ -337,12 +336,12 @@ async fn overwrite_is_explicit_for_copy_and_rename() {
         .unwrap();
     assert!(
         driver
-            .rename_safe("rename-source.txt", "target.txt", false)
+            .rename("rename-source.txt", "target.txt", false)
             .await
             .is_err()
     );
     driver
-        .rename_safe("rename-source.txt", "target.txt", true)
+        .rename("rename-source.txt", "target.txt", true)
         .await
         .unwrap();
     assert_eq!(
@@ -359,7 +358,7 @@ async fn overwrite_is_explicit_for_copy_and_rename() {
     .await
     .unwrap();
     driver
-        .rename_safe("rename-no-overwrite.txt", "renamed-no-overwrite.txt", false)
+        .rename("rename-no-overwrite.txt", "renamed-no-overwrite.txt", false)
         .await
         .unwrap();
     assert_eq!(
@@ -368,4 +367,46 @@ async fn overwrite_is_explicit_for_copy_and_rename() {
             .unwrap(),
         b"renamed safely"
     );
+}
+
+#[tokio::test]
+async fn list_query_paginates_and_sorts_through_filesystem_seam() {
+    let temp = tempfile::tempdir().unwrap();
+    for i in 0..15 {
+        tokio::fs::write(temp.path().join(format!("doc{i:02}.txt")), b"hello")
+            .await
+            .unwrap();
+    }
+    let fs = driver(temp.path());
+
+    let page1 = fs
+        .list_query(
+            "",
+            rulist::filesystem::DirectoryQuery {
+                order_by: Some("name"),
+                reverse: false,
+                page: Some(1),
+                per_page: Some(5),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page1.total, 15);
+    assert_eq!(page1.entries.len(), 5);
+    assert_eq!(page1.entries[0].name, "doc00.txt");
+    assert_eq!(page1.entries[4].name, "doc04.txt");
+
+    let page2 = fs
+        .list_query(
+            "",
+            rulist::filesystem::DirectoryQuery {
+                order_by: Some("name"),
+                reverse: true,
+                page: Some(1),
+                per_page: Some(5),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page2.entries[0].name, "doc14.txt");
 }

@@ -105,7 +105,7 @@ pub(crate) async fn rename_handler(
         Err(_) => return api_error(StatusCode::NOT_FOUND, 404, "File root not found"),
     };
 
-    match fs.rename_safe(&path, &req.name, req.overwrite).await {
+    match fs.rename(&path, &req.name, req.overwrite).await {
         Ok(_) => api_success(serde_json::Value::Null),
         Err(err) => filesystem_error_response(&err, "rename"),
     }

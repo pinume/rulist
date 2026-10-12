@@ -7,6 +7,12 @@ export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+if ! node --experimental-strip-types -e "" >/dev/null 2>&1; then
+    echo "=== Error: Current Node.js does not support --experimental-strip-types ==="
+    echo "Please ensure official Node.js >= 22.6 is installed and in PATH."
+    exit 1
+fi
+
 echo "=== [1/5] Checking Rust code format ==="
 cargo fmt --check
 
@@ -17,10 +23,10 @@ echo "=== [3/5] Checking frontend types (tsc) ==="
 pnpm --prefix web lint
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    staged_frontend_files=$(git diff --cached --name-only --diff-filter=d | grep -E '^web/src/.*\.(js|ts|tsx|jsx|css|json)$' || true)
-    if [[ -n "$staged_frontend_files" ]]; then
-        echo "=== [3.5/5] Checking staged frontend code formatting (prettier) ==="
-        echo "$staged_frontend_files" | sed 's|^web/||' | (cd web && xargs pnpm exec prettier --check)
+    modified_frontend_files=$(git diff HEAD --name-only --diff-filter=d | grep -E '^web/src/.*\.(js|ts|tsx|jsx|css|json)$' || true)
+    if [[ -n "$modified_frontend_files" ]]; then
+        echo "=== [3.5/5] Checking modified frontend code formatting (prettier) ==="
+        echo "$modified_frontend_files" | sed 's|^web/||' | (cd web && xargs pnpm exec prettier --check)
     fi
 fi
 

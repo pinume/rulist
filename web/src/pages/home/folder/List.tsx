@@ -15,6 +15,7 @@ import {
   VStack,
 } from "@hope-ui/solid"
 import { For, Show } from "solid-js"
+import { hairlineBorderColor } from "~/app/theme"
 import { useFiles, useRouter } from "~/hooks"
 import {
   countMsg,
@@ -68,7 +69,7 @@ export const ListTitle = (props: {
       px="$3"
       py="$2"
       borderBottom="1px solid"
-      borderColor="$neutral4"
+      borderColor={hairlineBorderColor()}
       bgColor={useColorModeValue("$neutral2", "$neutral4")()}
       borderTopRadius="$xl"
     >
@@ -260,7 +261,7 @@ const ListLayout = () => {
         w="$full"
         spacing="$0"
         position="sticky"
-        top={pathname().split("/").filter(Boolean).length ? "100px" : "60px"}
+        top={pathname().split("/").filter(Boolean).length ? "86px" : "50px"}
         zIndex={80}
       >
         <ListTitle
@@ -278,7 +279,7 @@ const ListLayout = () => {
             py="$2"
             spacing="$3"
             borderBottom="1px solid"
-            borderColor="$neutral4"
+            borderColor={hairlineBorderColor()}
             bgColor={useColorModeValue("$info2", "$neutral4")()}
           >
             <For
@@ -330,7 +331,7 @@ const ListLayout = () => {
         px="$3"
         py="$2"
         borderTop="1px solid"
-        borderColor="$neutral4"
+        borderColor={hairlineBorderColor()}
         bgColor={useColorModeValue("$neutral1", "$neutral3")()}
         justifyContent="space-between"
         alignItems="center"

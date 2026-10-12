@@ -2,7 +2,7 @@ use axum::extract::{Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 
-use crate::filesystem::{sort_files_by, sorted_snapshot_page};
+use crate::filesystem::DirectoryQuery;
 use crate::server::{
     SharedState, SignedFileEntry, api_error, api_success, authenticate_user,
     normalize_request_path, signed_file_entry,
@@ -59,30 +59,18 @@ pub(crate) async fn list_handler(
         Err(_) => return api_error(StatusCode::NOT_FOUND, 404, "File root not found"),
     };
 
-    match fs.list_snapshot(&path).await {
-        Ok(snapshot) => {
-            let total = snapshot.len() as i64;
+    let query = DirectoryQuery::new(
+        req.order_by.as_deref(),
+        req.reverse.unwrap_or(false),
+        req.page,
+        req.per_page,
+    );
 
-            let content = if let Some(per_page) = req.per_page.filter(|&size| size > 0) {
-                let page = req.page.unwrap_or(1).max(1);
-                sorted_snapshot_page(
-                    &snapshot,
-                    req.order_by.as_deref(),
-                    req.reverse.unwrap_or(false),
-                    page,
-                    per_page,
-                )
-            } else {
-                let mut content = snapshot.to_vec();
-                sort_files_by(
-                    &mut content,
-                    req.order_by.as_deref(),
-                    req.reverse.unwrap_or(false),
-                );
-                content
-            };
-
-            let content = match content
+    match fs.list_query(&path, query).await {
+        Ok(page) => {
+            let total = page.total as i64;
+            let content = match page
+                .entries
                 .into_iter()
                 .map(|entry| {
                     let item_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);

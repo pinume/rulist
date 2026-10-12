@@ -25,10 +25,6 @@ import { IoFolder } from "solid-icons/io"
 import { ImAndroid } from "solid-icons/im"
 import { FileEntry, FileType } from "~/types"
 import { ext } from "./path"
-import {
-  VscodeIconsFileTypeAi2,
-  VscodeIconsFileTypePhotoshop2,
-} from "~/components"
 import { SiAsciinema } from "solid-icons/si"
 import { FiGlobe } from "solid-icons/fi"
 import { mainColor } from "~/store"
@@ -50,25 +46,24 @@ const iconMap = {
   "txt,log,text": BsFileEarmarkTextFill,
   "js,ts,jsx,tsx,json,xml,yaml,yml,rs,go,py,c,cpp,h,sh,toml,sql,css,scss":
     BsFileEarmarkCodeFill,
-  psd: VscodeIconsFileTypePhotoshop2,
-  ai: VscodeIconsFileTypeAi2,
   url: FaSolidLink,
   cast: SiAsciinema,
   "html,htm": FiGlobe,
-  "jpg,jpeg,png,gif,bmp,webp,svg,ico,tiff,heic": BsFileEarmarkImageFill,
+  "jpg,jpeg,png,gif,bmp,webp,svg,ico,tiff,heic,psd,ai": BsFileEarmarkImageFill,
   "mp4,mkv,avi,mov,wmv,flv,webm,m4v,rmvb,ts": BsFileEarmarkPlayFill,
   "mp3,flac,ogg,m4a,wav,opus,aac,wma": BsFileEarmarkMusicFill,
 }
 
-export const getIconByTypeAndName = (type: number, name: string) => {
-  if (type !== FileType.FOLDER) {
+export const getIconByFile = (obj: Pick<FileEntry, "type" | "name">) => {
+  if (obj.type !== FileType.FOLDER) {
+    const extension = ext(obj.name).toLowerCase()
     for (const [extensions, icon] of Object.entries(iconMap)) {
-      if (extensions.split(",").includes(ext(name).toLowerCase())) {
+      if (extensions.split(",").includes(extension)) {
         return icon
       }
     }
   }
-  switch (type) {
+  switch (obj.type) {
     case FileType.FOLDER:
       return IoFolder
     case FileType.VIDEO:
@@ -82,10 +77,6 @@ export const getIconByTypeAndName = (type: number, name: string) => {
     default:
       return BsFileEarmarkMinusFill
   }
-}
-
-export const getIconByFile = (obj: Pick<FileEntry, "type" | "name">) => {
-  return getIconByTypeAndName(obj.type, obj.name)
 }
 
 export const getIconColorByFile = (obj: Pick<FileEntry, "type" | "name">) => {
