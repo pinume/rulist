@@ -15,6 +15,7 @@ import {
   onCleanup,
   onMount,
 } from "solid-js"
+import { hairlineBorderColor } from "~/app/theme"
 import {
   clearDirectoryFilter,
   directoryFilter,
@@ -76,15 +77,24 @@ export const Header = () => {
       position="sticky"
       top={0}
       zIndex={100}
-      bgColor="$background"
-      h="60px"
+      bgColor={useColorModeValue(
+        "rgba(248, 250, 252, 0.85)",
+        "rgba(9, 9, 11, 0.85)",
+      )()}
+      css={{
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
+      }}
+      borderBottom="1px solid"
+      borderColor={hairlineBorderColor()}
+      h="50px"
       class="header"
       w="$full"
     >
       <Container>
         <HStack
           px={{ "@initial": "$3", "@md": "$6" }}
-          py="$2"
+          py="$1"
           w="$full"
           spacing="$2"
           justifyContent="space-between"
@@ -94,16 +104,16 @@ export const Header = () => {
             href="/"
             aria-label="Home"
             class="header-left"
-            h="44px"
-            w="44px"
+            h="36px"
+            w="36px"
             flexShrink={0}
           >
             <Image
               src={logoSrc()}
-              h="32px"
+              h="26px"
               w="auto"
               fallback={
-                <Image src={logoUrl("favicon.ico")} h="32px" w="auto" />
+                <Image src={logoUrl("favicon.ico")} h="26px" w="auto" />
               }
             />
           </HStack>
@@ -119,6 +129,7 @@ export const Header = () => {
                 }
                 w={{ "@initial": "150px", "@sm": "260px", "@md": "360px" }}
                 size="sm"
+                h="32px"
               />
             </Show>
             <AddMenu />

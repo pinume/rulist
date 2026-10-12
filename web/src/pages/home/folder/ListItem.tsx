@@ -75,10 +75,13 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
         data-index={props.index}
         w="$full"
         px={{ "@initial": "$3", "@md": "$4" }}
-        py="$3"
+        py="$2_5"
         borderBottom="1px solid"
-        borderColor="$neutral3"
-        transition="background-color 0.15s"
+        borderColor={useColorModeValue(
+          "rgba(0, 0, 0, 0.04)",
+          "rgba(255, 255, 255, 0.05)",
+        )()}
+        transition="background-color 0.15s ease"
         _hover={{
           bgColor: props.obj.selected
             ? colorAlpha(mainColor(), 0.13)
@@ -225,9 +228,20 @@ export const ListItem = (props: { obj: FileItem; index: number }) => {
                 cursor="pointer"
                 bg="transparent"
                 color="$neutral10"
+                opacity={{ "@initial": 1, "@md": 0.35 }}
+                css={{
+                  transition: "opacity 0.15s ease, background-color 0.15s ease",
+                  ".list-item:hover &": {
+                    opacity: 1,
+                  },
+                  "&[aria-expanded='true']": {
+                    opacity: 1,
+                  },
+                }}
                 _hover={{
                   bgColor: useColorModeValue("$neutral3", "$neutral5")(),
                   color: "$neutral12",
+                  opacity: 1,
                 }}
                 aria-label="Actions"
               >

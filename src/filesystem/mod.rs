@@ -91,6 +91,36 @@ pub struct FileEntry {
     pub permissions: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DirectoryQuery<'a> {
+    pub order_by: Option<&'a str>,
+    pub reverse: bool,
+    pub page: Option<usize>,
+    pub per_page: Option<usize>,
+}
+
+impl<'a> DirectoryQuery<'a> {
+    pub fn new(
+        order_by: Option<&'a str>,
+        reverse: bool,
+        page: Option<usize>,
+        per_page: Option<usize>,
+    ) -> Self {
+        Self {
+            order_by,
+            reverse,
+            page,
+            per_page: per_page.filter(|&size| size > 0),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectoryPage {
+    pub entries: Vec<FileEntry>,
+    pub total: usize,
+}
+
 impl FileEntry {
     pub fn new(
         name: impl Into<String>,

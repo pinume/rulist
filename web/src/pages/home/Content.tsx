@@ -25,7 +25,7 @@ export const Content = () => {
       bgColor={cardBg()}
       p="$0"
       border="1px solid"
-      borderColor="$neutral4"
+      borderColor={useColorModeValue("rgba(0, 0, 0, 0.08)", "$neutral4")()}
       shadow="$sm"
       overflow="visible"
       spacing="$0"

@@ -29,9 +29,7 @@ pub async fn raw_download_handler(
     Query(query): Query<SignQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let mut response = stream_file(state, path, query.sign, query.uid, headers, true).await;
-    apply_private_stream_headers(&mut response);
-    response
+    stream_file(state, path, query, headers, true).await
 }
 
 pub async fn raw_preview_handler(
@@ -40,15 +38,7 @@ pub async fn raw_preview_handler(
     Query(query): Query<SignQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let mut response = stream_file(state, path, query.sign, query.uid, headers, false).await;
-    apply_private_stream_headers(&mut response);
-    response
-}
-
-fn apply_private_stream_headers(response: &mut Response) {
-    let headers = response.headers_mut();
-    headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
-    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    stream_file(state, path, query, headers, false).await
 }
 
 pub fn percent_decode(s: &str) -> String {
@@ -71,122 +61,207 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum StreamError {
+    InvalidPath,
+    Unauthorized,
+    InvalidSignature,
+    ExpiredOrInvalidSignature,
+    NotFound,
+    IsDirectory,
+    MetadataFailed,
+}
+
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StreamError::InvalidPath => write!(f, "Invalid path"),
+            StreamError::Unauthorized => write!(f, "Unauthorized"),
+            StreamError::InvalidSignature => write!(f, "Invalid download link signature"),
+            StreamError::ExpiredOrInvalidSignature => {
+                write!(f, "Invalid or expired download link signature")
+            }
+            StreamError::NotFound => write!(f, "File not found"),
+            StreamError::IsDirectory => write!(f, "Cannot download directory directly"),
+            StreamError::MetadataFailed => write!(f, "Failed to read file metadata"),
+        }
+    }
+}
+
+impl std::error::Error for StreamError {}
+
+impl IntoResponse for StreamError {
+    fn into_response(self) -> Response {
+        let mut resp = match self {
+            StreamError::InvalidPath => (StatusCode::BAD_REQUEST, "Invalid path").into_response(),
+            StreamError::Unauthorized => StatusCode::UNAUTHORIZED.into_response(),
+            StreamError::InvalidSignature => {
+                (StatusCode::FORBIDDEN, "Invalid download link signature").into_response()
+            }
+            StreamError::ExpiredOrInvalidSignature => (
+                StatusCode::FORBIDDEN,
+                "Invalid or expired download link signature",
+            )
+                .into_response(),
+            StreamError::NotFound => (StatusCode::NOT_FOUND, "File not found").into_response(),
+            StreamError::IsDirectory => (
+                StatusCode::BAD_REQUEST,
+                "Cannot download directory directly",
+            )
+                .into_response(),
+            StreamError::MetadataFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to read file metadata",
+            )
+                .into_response(),
+        };
+        let h = resp.headers_mut();
+        h.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+        h.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+        resp
+    }
+}
+
+pub struct FileStream {
+    file: tokio::fs::File,
+    file_size: u64,
+    content_type: &'static str,
+    filename: String,
+    as_attachment: bool,
+}
+
+impl FileStream {
+    pub async fn open(fs: &LocalFs, path: &str, as_attachment: bool) -> Result<Self, StreamError> {
+        let file = match fs.open(path).await {
+            Ok(f) => f,
+            Err(_) => return Err(StreamError::NotFound),
+        };
+        Self::from_file(file, path, as_attachment).await
+    }
+
+    pub async fn from_file(
+        file: tokio::fs::File,
+        path: &str,
+        as_attachment: bool,
+    ) -> Result<Self, StreamError> {
+        let meta = match file.metadata().await {
+            Ok(m) => m,
+            Err(_) => return Err(StreamError::MetadataFailed),
+        };
+
+        if meta.is_dir() {
+            return Err(StreamError::IsDirectory);
+        }
+
+        let file_size = meta.len();
+        let content_type = crate::preview::detector::detect_from_path(path).1;
+        let filename = Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        Ok(Self {
+            file,
+            file_size,
+            content_type,
+            filename,
+            as_attachment,
+        })
+    }
+
+    pub async fn into_response(mut self, range_header: Option<&str>) -> Response {
+        let disposition = safe_content_disposition(&self.filename, self.as_attachment);
+
+        if let Some(range_val) = range_header {
+            if let Some((start, end)) = parse_range(range_val, self.file_size) {
+                let part_len = end - start + 1;
+                if self.file.seek(SeekFrom::Start(start)).await.is_err() {
+                    return range_not_satisfiable(self.file_size);
+                }
+
+                let stream = ReaderStream::new(self.file.take(part_len));
+                let mut resp =
+                    (StatusCode::PARTIAL_CONTENT, Body::from_stream(stream)).into_response();
+                let range_str = format!("bytes {start}-{end}/{}", self.file_size);
+                apply_stream_headers(
+                    &mut resp,
+                    self.content_type,
+                    part_len,
+                    disposition,
+                    self.as_attachment,
+                    Some(&range_str),
+                );
+                return resp;
+            } else {
+                return range_not_satisfiable(self.file_size);
+            }
+        }
+
+        let stream = ReaderStream::new(self.file.take(self.file_size));
+        let mut resp = (StatusCode::OK, Body::from_stream(stream)).into_response();
+        apply_stream_headers(
+            &mut resp,
+            self.content_type,
+            self.file_size,
+            disposition,
+            self.as_attachment,
+            None,
+        );
+        resp
+    }
+}
+
+async fn resolve_stream_fs(
+    state: &SharedState,
+    clean_path: &str,
+    query: &SignQuery,
+    headers: &HeaderMap,
+) -> Result<LocalFs, StreamError> {
+    if let Some(ref s) = query.sign {
+        let Some(uid) = query.uid else {
+            return Err(StreamError::InvalidSignature);
+        };
+        let user = match get_user_by_id(&state.pool, uid).await {
+            Ok(Some(user)) if !user.disabled => user,
+            _ => return Err(StreamError::InvalidSignature),
+        };
+        if verify_user_link(&state.config.jwt_secret, &user, clean_path, s).is_err() {
+            return Err(StreamError::ExpiredOrInvalidSignature);
+        }
+        LocalFs::new(&user.local_path, false).map_err(|_| StreamError::NotFound)
+    } else {
+        let Some(user) = authenticate_user(headers, state).await else {
+            return Err(StreamError::Unauthorized);
+        };
+        LocalFs::new(&user.local_path, false).map_err(|_| StreamError::NotFound)
+    }
+}
+
 async fn stream_file(
     state: SharedState,
     raw_path: String,
-    sign: Option<String>,
-    uid: Option<i64>,
+    query: SignQuery,
     headers: HeaderMap,
     as_attachment: bool,
 ) -> Response {
     let clean_path = format!("/{}", raw_path.trim_start_matches('/'));
     if clean_path.split(['/', '\\']).any(|p| p == "." || p == "..") {
-        return (StatusCode::BAD_REQUEST, "Invalid path").into_response();
+        return StreamError::InvalidPath.into_response();
     }
 
-    let fs = if sign.is_some() {
-        let s = sign.unwrap_or_default();
-        let Some(uid) = uid else {
-            return (StatusCode::FORBIDDEN, "Invalid download link signature").into_response();
-        };
-        let user = match get_user_by_id(&state.pool, uid).await {
-            Ok(Some(user)) if !user.disabled => user,
-            _ => return (StatusCode::FORBIDDEN, "Invalid download link signature").into_response(),
-        };
-        if verify_user_link(&state.config.jwt_secret, &user, &clean_path, &s).is_err() {
-            return (
-                StatusCode::FORBIDDEN,
-                "Invalid or expired download link signature",
-            )
-                .into_response();
-        }
-        match LocalFs::new(&user.local_path, false) {
-            Ok(fs) => fs,
-            Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
-        }
-    } else {
-        let Some(user) = authenticate_user(&headers, &state).await else {
-            return StatusCode::UNAUTHORIZED.into_response();
-        };
-        match LocalFs::new(&user.local_path, false) {
-            Ok(fs) => fs,
-            Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
-        }
+    let fs = match resolve_stream_fs(&state, &clean_path, &query, &headers).await {
+        Ok(fs) => fs,
+        Err(err) => return err.into_response(),
     };
 
-    let mut file = match fs.open(&clean_path).await {
-        Ok(f) => f,
-        Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
+    let stream = match FileStream::open(&fs, &clean_path, as_attachment).await {
+        Ok(stream) => stream,
+        Err(err) => return err.into_response(),
     };
 
-    let meta = match file.metadata().await {
-        Ok(m) => m,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to read file metadata",
-            )
-                .into_response();
-        }
-    };
-
-    if meta.is_dir() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Cannot download directory directly",
-        )
-            .into_response();
-    }
-
-    let file_size = meta.len();
-    let content_type = crate::preview::detector::detect_from_path(&clean_path).1;
-
-    let filename = Path::new(&clean_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
-
-    let disposition = safe_content_disposition(filename, as_attachment);
-
-    // Range header handling
     let range_header = headers.get("range").and_then(|r| r.to_str().ok());
-
-    if let Some(range_val) = range_header {
-        if let Some((start, end)) = parse_range(range_val, file_size) {
-            let part_len = end - start + 1;
-            if file.seek(SeekFrom::Start(start)).await.is_err() {
-                return range_not_satisfiable(file_size);
-            }
-
-            let stream = ReaderStream::new(file.take(part_len));
-            let mut resp = (StatusCode::PARTIAL_CONTENT, Body::from_stream(stream)).into_response();
-            let range_str = format!("bytes {start}-{end}/{file_size}");
-            apply_stream_headers(
-                &mut resp,
-                content_type,
-                part_len,
-                disposition,
-                as_attachment,
-                Some(&range_str),
-            );
-            return resp;
-        } else {
-            return range_not_satisfiable(file_size);
-        }
-    }
-
-    // Full response
-    let stream = ReaderStream::new(file.take(file_size));
-    let mut resp = (StatusCode::OK, Body::from_stream(stream)).into_response();
-    apply_stream_headers(
-        &mut resp,
-        content_type,
-        file_size,
-        disposition,
-        as_attachment,
-        None,
-    );
-    resp
+    stream.into_response(range_header).await
 }
 
 fn apply_stream_headers(
@@ -216,6 +291,8 @@ fn apply_stream_headers(
     {
         h.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
     }
+    h.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    h.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
 }
 
 fn range_not_satisfiable(file_size: u64) -> Response {
@@ -225,6 +302,8 @@ fn range_not_satisfiable(file_size: u64) -> Response {
     if let Ok(val) = HeaderValue::from_str(&format!("bytes */{}", file_size)) {
         h.insert(CONTENT_RANGE, val);
     }
+    h.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    h.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     resp
 }
 
@@ -335,5 +414,80 @@ mod tests {
         assert_eq!(parse_range("invalid", 100), None);
         assert_eq!(parse_range("bytes=--", 100), None);
         assert_eq!(parse_range("bytes=0-1-2", 100), None);
+    }
+
+    #[tokio::test]
+    async fn test_file_stream_full_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("full.txt");
+        tokio::fs::write(&path, b"hello streaming world")
+            .await
+            .unwrap();
+
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let stream = FileStream::from_file(file, "full.txt", false)
+            .await
+            .unwrap();
+        let resp = stream.into_response(None).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get(ACCEPT_RANGES).unwrap(), "bytes");
+        assert_eq!(resp.headers().get(CONTENT_LENGTH).unwrap(), "21");
+        assert_eq!(
+            resp.headers().get(CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+        assert_eq!(resp.headers().get(REFERRER_POLICY).unwrap(), "no-referrer");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"hello streaming world");
+    }
+
+    #[tokio::test]
+    async fn test_file_stream_range_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("range.txt");
+        tokio::fs::write(&path, b"0123456789").await.unwrap();
+
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let stream = FileStream::from_file(file, "range.txt", true)
+            .await
+            .unwrap();
+        let resp = stream.into_response(Some("bytes=3-7")).await;
+
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers().get(CONTENT_RANGE).unwrap(), "bytes 3-7/10");
+        assert_eq!(resp.headers().get(CONTENT_LENGTH).unwrap(), "5");
+        assert_eq!(
+            resp.headers().get(CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+        assert_eq!(resp.headers().get(REFERRER_POLICY).unwrap(), "no-referrer");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"34567");
+    }
+
+    #[tokio::test]
+    async fn test_file_stream_unsatisfiable_range() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("invalid.txt");
+        tokio::fs::write(&path, b"0123456789").await.unwrap();
+
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let stream = FileStream::from_file(file, "invalid.txt", false)
+            .await
+            .unwrap();
+        let resp = stream.into_response(Some("bytes=50-100")).await;
+
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(resp.headers().get(CONTENT_RANGE).unwrap(), "bytes */10");
+        assert_eq!(
+            resp.headers().get(CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+        assert_eq!(resp.headers().get(REFERRER_POLICY).unwrap(), "no-referrer");
     }
 }

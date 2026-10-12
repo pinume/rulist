@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::fs;
 
-use crate::filesystem::{BatchError, ConflictPolicy, FileEntry, FsError, valid_name};
+use crate::filesystem::{
+    BatchError, ConflictPolicy, DirectoryPage, DirectoryQuery, FileEntry, FsError, sort_files_by,
+    sorted_snapshot_page, valid_name,
+};
 
 use super::ops::{
     copy_path_safe, entry_exists, move_path_safe, remove_path_recursive, rename_no_replace,
@@ -149,7 +152,26 @@ impl LocalFs {
     }
 
     pub async fn list(&self, subpath: &str) -> Result<Vec<FileEntry>> {
-        Ok(self.list_snapshot(subpath).await?.to_vec())
+        let page = self.list_query(subpath, DirectoryQuery::default()).await?;
+        Ok(page.entries)
+    }
+
+    pub async fn list_query(
+        &self,
+        subpath: &str,
+        query: DirectoryQuery<'_>,
+    ) -> Result<DirectoryPage> {
+        let snapshot = self.list_snapshot(subpath).await?;
+        let total = snapshot.len();
+        let entries = if let Some(per_page) = query.per_page.filter(|&size| size > 0) {
+            let page = query.page.unwrap_or(1).max(1);
+            sorted_snapshot_page(&snapshot, query.order_by, query.reverse, page, per_page)
+        } else {
+            let mut entries = snapshot.to_vec();
+            sort_files_by(&mut entries, query.order_by, query.reverse);
+            entries
+        };
+        Ok(DirectoryPage { entries, total })
     }
 
     pub(crate) async fn list_snapshot(&self, subpath: &str) -> Result<Arc<[FileEntry]>> {
@@ -404,10 +426,10 @@ impl LocalFs {
         let total = transfers.len();
         for (completed, (src, dst)) in transfers.into_iter().enumerate() {
             let result = if moving {
-                self.move_to_safe(&src, &dst, policy == ConflictPolicy::Overwrite)
+                self.move_to(&src, &dst, policy == ConflictPolicy::Overwrite)
                     .await
             } else {
-                self.copy_to_safe(&src, &dst, policy == ConflictPolicy::Overwrite)
+                self.copy_to(&src, &dst, policy == ConflictPolicy::Overwrite)
                     .await
             };
             if let Err(cause) = result {
@@ -460,22 +482,17 @@ impl LocalFs {
         remove_path_recursive(&full_path).await
     }
 
-    pub async fn rename_safe(&self, subpath: &str, new_name: &str, overwrite: bool) -> Result<()> {
+    pub async fn rename(&self, subpath: &str, new_name: &str, overwrite: bool) -> Result<()> {
         let fs = self.clone();
         let subpath = subpath.to_owned();
         let new_name = new_name.to_owned();
-        run_mutation_to_completion(async move {
-            fs.rename_safe_inner(&subpath, &new_name, overwrite).await
-        })
+        run_mutation_to_completion(
+            async move { fs.rename_inner(&subpath, &new_name, overwrite).await },
+        )
         .await
     }
 
-    async fn rename_safe_inner(
-        &self,
-        subpath: &str,
-        new_name: &str,
-        overwrite: bool,
-    ) -> Result<()> {
+    async fn rename_inner(&self, subpath: &str, new_name: &str, overwrite: bool) -> Result<()> {
         let _mutation = ListingMutation::new();
         if subpath.trim_matches('/').is_empty() {
             return Err(FsError::InvalidPath.into());
@@ -675,11 +692,7 @@ impl LocalFs {
         Ok(())
     }
 
-    pub async fn move_to(&self, src_subpath: &str, dst_subpath: &str) -> Result<()> {
-        self.move_to_safe(src_subpath, dst_subpath, true).await
-    }
-
-    pub async fn move_to_safe(
+    pub async fn move_to(
         &self,
         src_subpath: &str,
         dst_subpath: &str,
@@ -689,13 +702,13 @@ impl LocalFs {
         let src_subpath = src_subpath.to_owned();
         let dst_subpath = dst_subpath.to_owned();
         run_mutation_to_completion(async move {
-            fs.move_to_safe_inner(&src_subpath, &dst_subpath, overwrite)
+            fs.move_to_inner(&src_subpath, &dst_subpath, overwrite)
                 .await
         })
         .await
     }
 
-    async fn move_to_safe_inner(
+    async fn move_to_inner(
         &self,
         src_subpath: &str,
         dst_subpath: &str,
@@ -710,11 +723,7 @@ impl LocalFs {
         move_path_safe(&src_path, &dst_path, overwrite).await
     }
 
-    pub async fn copy_to(&self, src_subpath: &str, dst_subpath: &str) -> Result<()> {
-        self.copy_to_safe(src_subpath, dst_subpath, true).await
-    }
-
-    pub async fn copy_to_safe(
+    pub async fn copy_to(
         &self,
         src_subpath: &str,
         dst_subpath: &str,
@@ -724,13 +733,13 @@ impl LocalFs {
         let src_subpath = src_subpath.to_owned();
         let dst_subpath = dst_subpath.to_owned();
         run_mutation_to_completion(async move {
-            fs.copy_to_safe_inner(&src_subpath, &dst_subpath, overwrite)
+            fs.copy_to_inner(&src_subpath, &dst_subpath, overwrite)
                 .await
         })
         .await
     }
 
-    async fn copy_to_safe_inner(
+    async fn copy_to_inner(
         &self,
         src_subpath: &str,
         dst_subpath: &str,
@@ -854,7 +863,7 @@ mod tests {
         fs.mkdir("nested").await.unwrap();
         assert!(LISTING_CACHE.lock().unwrap().entry.is_none());
         assert_eq!(fs.list("/").await.unwrap().len(), 3);
-        fs.rename_safe("external.txt", "renamed.txt", false)
+        fs.rename("external.txt", "renamed.txt", false)
             .await
             .unwrap();
         let entries = fs.list("/").await.unwrap();

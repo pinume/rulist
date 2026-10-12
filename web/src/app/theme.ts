@@ -1,12 +1,16 @@
-import { globalCss, HopeThemeConfig } from "@hope-ui/solid"
+import { globalCss, HopeThemeConfig, useColorModeValue } from "@hope-ui/solid"
 import { hoverColor } from "~/utils"
 
 const theme: HopeThemeConfig = {
   initialColorMode: "system",
   lightTheme: {
     colors: {
-      // background: "$neutral2",
-      background: "#f7f8fa",
+      background: "#f8fafc",
+    },
+  },
+  darkTheme: {
+    colors: {
+      background: "#09090b",
     },
   },
   components: {
@@ -181,6 +185,9 @@ export const globalStyles = globalCss({
       'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
     width: "100%",
     minHeight: "100%",
+    WebkitFontSmoothing: "antialiased",
+    MozOsxFontSmoothing: "grayscale",
+    textRendering: "optimizeLegibility",
   },
   "#root": {
     width: "100%",
@@ -194,5 +201,8 @@ export const globalStyles = globalCss({
     rowGap: "0 !important",
   },
 })
+
+export const hairlineBorderColor = () =>
+  useColorModeValue("rgba(0, 0, 0, 0.06)", "rgba(255, 255, 255, 0.08)")()
 
 export { theme }
